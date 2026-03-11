@@ -1686,8 +1686,29 @@ function renderChipinBody(s){
         <div style="font-family:'Barlow Condensed',sans-serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--primary);margin:12px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--primary-dim)">
           💳 Expense Payer(s) — To Receive Back
         </div>
-        ${expPayerRows.map(r=>`
-          <div class="chipin-row" style="border-color:rgba(0,212,255,0.3);background:rgba(0,212,255,0.04)">
+        ${expPayerRows.map(r=>{
+          // Calculate how much has already been offset (from payment notes/status)
+          const payerPayRec=payments.find(p=>p.memberId===r.aid);
+          const alreadyOffset=payerPayRec&&payerPayRec.status==='refund-offset';
+          // Compute total already applied to others on behalf of this payer
+          const alreadyApplied = alreadyOffset ? (()=>{
+            // Sum up what was applied: we re-derive from other players' payment notes mentioning this payer
+            let applied=0;
+            payments.forEach(p=>{
+              if(p.memberId===r.aid)return;
+              if((p.note||'').includes(esc(r.nm))||((p.note||'').toLowerCase().includes('offset from')&&(p.note||'').includes(r.nm.split(' ')[0])))
+                applied=0; // fallback: trust the stored refund remaining from note
+            });
+            // Parse leftover from note if present
+            const noteMatch=(payerPayRec.note||'').match(/cash return pending/);
+            if(!noteMatch) return r.netRefund; // all covered
+            const m2=(payerPayRec.note||'').match(/(\d[\d,.]*)\s*cash return/);
+            return m2?parseFloat(m2[1].replace(/,/g,'')):r.netRefund;
+          })() : r.netRefund;
+          const displayRefund=alreadyOffset?alreadyApplied:r.netRefund;
+          const fullySettled=alreadyOffset&&displayRefund<0.01;
+          return `
+          <div class="chipin-row" style="border-color:${fullySettled?'rgba(0,232,153,0.3)':'rgba(0,212,255,0.3)'};background:${fullySettled?'rgba(0,232,153,0.04)':'rgba(0,212,255,0.04)'}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
               <div class="m-avatar" style="width:28px;height:28px;font-size:10px;background:${avatarColor(r.nm)}22;color:${avatarColor(r.nm)}">${initials(r.nm)}</div>
               <div style="min-width:0">
@@ -1695,17 +1716,20 @@ function renderChipinBody(s){
                 <div style="font-size:10px;color:var(--text3)">
                   Paid expenses: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span>
                   · Their share: ${fmtMoney(r.totalOwed)}
-                  · <span style="color:var(--green);font-weight:600">Return: ${fmtMoney(r.netRefund)}</span>
+                  · <span style="color:${fullySettled?'var(--green)':'var(--gold)'};font-weight:600">${fullySettled?'Fully Settled ✓':'Return: '+fmtMoney(displayRefund)}</span>
                 </div>
+                ${alreadyOffset&&!fullySettled?`<div style="font-size:10px;color:var(--text3);margin-top:2px">${(payerPayRec.note||'').replace(/AED /g,'AED ')}</div>`:''}
                 ${r.carryover>0?`<div style="font-size:10px;color:var(--orange)">(+${fmtMoney(r.carryover)} carry-over included)</div>`:''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-              <span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(r.netRefund)}</span>
-              ${canAdmin()?`<button class="btn btn-ghost btn-xs" onclick="openRefundOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.netRefund})">⚙ Offset</button>`:''}
+              ${fullySettled
+                ?'<span class="badge badge-green">Settled</span>'
+                :`<span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(displayRefund)}</span>`}
+              ${canAdmin()&&!fullySettled?`<button class="btn btn-ghost btn-xs" onclick="openRefundOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${displayRefund})">⚙ Offset</button>`:''}
             </div>
-          </div>
-        `).join('')}
+          </div>`;
+        }).join('')}
       `:''}
 
       ${normalRows.length?`
@@ -1739,7 +1763,7 @@ function renderChipinBody(s){
   `;
 }
 
-// Opens a modal to offset a payer's refund against another player's payment (e.g. couple)
+// Opens a modal to offset a payer's refund against MULTIPLE players' payments (e.g. couples/friends)
 window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const att=s.attendees||[];
@@ -1751,7 +1775,6 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   const expensePayerTotals={};
   expenses.forEach(e=>{ if(e.paidBy) expensePayerTotals[e.paidBy]=(expensePayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
 
-  // Other attendees who still have balance to pay (excluding the payer themselves and other expense payers with net refund)
   const eligiblePlayers=att.filter(aid=>{
     if(aid===payerId)return false;
     const expPaid=expensePayerTotals[aid]||0;
@@ -1768,51 +1791,101 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
     return {aid, nm:m?m.name:'?', remaining: owed-paid};
   });
 
-  document.getElementById('payModalBody').innerHTML=`
-    <div class="modal-header" style="margin-bottom:14px">
-      <div class="modal-title">⚙ Offset Refund</div>
-      <button class="modal-close" onclick="closeModal('payModal')">✕</button>
-    </div>
-    <div style="font-size:13px;margin-bottom:8px">
-      <strong>${esc(payerName)}</strong> is owed back <span style="color:var(--primary);font-weight:700">${fmtMoney(refundAmt)}</span>.
-    </div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:14px">
-      Select another player (e.g. spouse/partner) — their payment will be reduced by the refund amount instead of paying cash back to ${esc(payerName)}.
-    </div>
-    <div class="form-group">
-      <label class="form-label">Apply offset to player</label>
-      <select class="form-select" id="offsetTarget">
-        <option value="">— select player —</option>
-        ${eligiblePlayers.map(p=>`<option value="${p.aid}" data-remaining="${p.remaining}">${esc(p.nm)} (owes ${fmtMoney(p.remaining)})</option>`).join('')}
-      </select>
-    </div>
-    <div id="offsetPreview" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
-    <div class="modal-footer" style="margin-top:12px;padding-bottom:0">
-      <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
-      <button class="btn btn-primary" onclick="applyRefundOffset('${sid}','${payerId}',${refundAmt})">Apply Offset</button>
-    </div>
-  `;
+  // Store offset selections: { [aid]: offsetAmt }
+  window._offsetSelections = {};
+  window._offsetRefundTotal = refundAmt;
+  window._offsetPayerId = payerId;
+  window._offsetPayerName = payerName;
+  window._offsetSid = sid;
+  window._offsetEligible = eligiblePlayers;
 
-  // Live preview
-  document.getElementById('offsetTarget').addEventListener('change',function(){
-    const sel=this.options[this.selectedIndex];
-    const remaining=parseFloat(sel.dataset.remaining)||0;
-    const applied=Math.min(refundAmt,remaining);
-    const leftover=refundAmt-applied;
-    document.getElementById('offsetPreview').innerHTML=remaining?`
-      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius2);padding:10px;margin-top:4px">
-        <div>Offset applied: <span style="color:var(--green)">${fmtMoney(applied)}</span></div>
-        <div style="margin-top:3px">${sel.text.split(' (')[0]} new balance: <span style="color:${remaining-applied>0?'var(--red)':'var(--green)'}">${fmtMoney(Math.max(0,remaining-applied))}</span></div>
-        ${leftover>0?`<div style="margin-top:3px;color:var(--orange)">Remaining to return to ${esc(payerName)}: ${fmtMoney(leftover)}</div>`:`<div style="margin-top:3px;color:var(--green)">Full refund covered! ✓</div>`}
-      </div>`:'';
-  });
+  function renderOffsetModal(){
+    const selections = window._offsetSelections;
+    const totalApplied = Object.values(selections).reduce((s,v)=>s+v,0);
+    const remaining = refundAmt - totalApplied;
 
+    document.getElementById('payModalBody').innerHTML=`
+      <div class="modal-header" style="margin-bottom:14px">
+        <div class="modal-title">⚙ Offset Refund</div>
+        <button class="modal-close" onclick="closeModal('payModal')">✕</button>
+      </div>
+      <div style="font-size:13px;margin-bottom:6px">
+        <strong>${esc(payerName)}</strong> is owed back <span style="color:var(--primary);font-weight:700">${fmtMoney(refundAmt)}</span>.
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:14px">Select one or more players — their balance will be reduced instead of cash being returned to ${esc(payerName)}.</div>
+
+      <!-- Running refund tracker -->
+      <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius2);padding:10px 12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:2px">Refund Remaining</div>
+          <div id="refundRemainingVal" style="font-family:'Bebas Neue',sans-serif;font-size:26px;line-height:1;color:${remaining>0.005?'var(--gold)':'var(--green)'}">${fmtMoney(remaining)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:2px">Applied So Far</div>
+          <div id="refundAppliedVal" style="font-family:'Bebas Neue',sans-serif;font-size:20px;line-height:1;color:var(--green)">${fmtMoney(totalApplied)}</div>
+        </div>
+      </div>
+
+      <!-- Player rows -->
+      <div id="offsetPlayerRows">
+        ${eligiblePlayers.map(p=>{
+          const sel=selections[p.aid]||0;
+          const isAdded=sel>0;
+          return `<div style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:var(--radius2);margin-bottom:5px;border:1px solid ${isAdded?'rgba(0,212,255,0.35)':'var(--border)'};background:${isAdded?'rgba(0,212,255,0.05)':'var(--surface2)'}">
+            <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(p.nm)}22;color:${avatarColor(p.nm)}">${initials(p.nm)}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;font-weight:600">${esc(p.nm)}</div>
+              <div style="font-size:10px;color:var(--text3)">Owes ${fmtMoney(p.remaining)}${isAdded?` · <span style="color:var(--green)">−${fmtMoney(sel)} offset → new bal ${fmtMoney(Math.max(0,p.remaining-sel))}</span>`:''}</div>
+            </div>
+            ${isAdded
+              ? `<div style="display:flex;align-items:center;gap:5px">
+                  <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;color:var(--green)">−${fmtMoney(sel)}</span>
+                  <button class="btn btn-red btn-xs" onclick="removeOffsetPlayer('${p.aid}')">✕</button>
+                </div>`
+              : `<button class="btn btn-ghost btn-xs" ${remaining<0.01?'disabled':''} onclick="addOffsetPlayer('${p.aid}',${p.remaining})">+ Add</button>`
+            }
+          </div>`;
+        }).join('')}
+        ${eligiblePlayers.length===0?`<div class="empty" style="padding:16px"><div class="empty-text">No players with outstanding balance.</div></div>`:''}
+      </div>
+
+      ${totalApplied>0&&remaining<0.01?`<div style="background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--green);margin-top:6px">✓ Full refund of ${fmtMoney(refundAmt)} is covered!</div>`:''}
+      ${remaining>0.005&&totalApplied>0?`<div style="background:var(--gold-dim);border:1px solid rgba(255,196,51,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--gold);margin-top:6px">⚠ ${fmtMoney(remaining)} still needs to be returned as cash to ${esc(payerName)}.</div>`:''}
+
+      <div class="modal-footer" style="margin-top:12px;padding-bottom:0">
+        <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
+        <button class="btn btn-primary" ${totalApplied<0.01?'disabled':''} onclick="applyRefundOffset()">Apply Offset${totalApplied>0?' ('+fmtMoney(totalApplied)+')':''}</button>
+      </div>
+    `;
+  }
+
+  window.addOffsetPlayer = function(aid, maxRemaining){
+    const remaining = window._offsetRefundTotal - Object.values(window._offsetSelections).reduce((s,v)=>s+v,0);
+    if(remaining<0.01){ toast('Refund fully allocated','info'); return; }
+    const toApply = Math.min(remaining, maxRemaining);
+    window._offsetSelections[aid] = toApply;
+    renderOffsetModal();
+  };
+
+  window.removeOffsetPlayer = function(aid){
+    delete window._offsetSelections[aid];
+    renderOffsetModal();
+  };
+
+  renderOffsetModal();
   openModal('payModal');
 };
 
-window.applyRefundOffset = async function(sid, payerId, refundAmt){
-  const targetId=document.getElementById('offsetTarget')?.value;
-  if(!targetId){ toast('Select a player to offset','error'); return; }
+window.applyRefundOffset = async function(){
+  const sid=window._offsetSid;
+  const payerId=window._offsetPayerId;
+  const payerName=window._offsetPayerName;
+  const refundAmt=window._offsetRefundTotal;
+  const selections=window._offsetSelections||{};
+  const eligiblePlayers=window._offsetEligible||[];
+
+  if(!Object.keys(selections).length){ toast('Select at least one player to offset','error'); return; }
+
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const expenses=s.expenses||[];
   const totalExpenses=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
@@ -1823,29 +1896,37 @@ window.applyRefundOffset = async function(sid, payerId, refundAmt){
   expenses.forEach(e=>{ if(e.paidBy) expensePayerTotals[e.paidBy]=(expensePayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
 
   const payments=[...(s.payments||[])];
-  const targetPay=payments.find(p=>p.memberId===targetId);
-  const targetPaid=targetPay?parseFloat(targetPay.amountPaid)||0:0;
-  const targetExpPaid=expensePayerTotals[targetId]||0;
-  const targetOwed=Math.max(0,perHead-targetExpPaid);
-  const applied=Math.min(refundAmt,Math.max(0,targetOwed-targetPaid));
-  const newPaid=targetPaid+applied;
-  const newStatus=newPaid>=targetOwed?'paid':newPaid>0?'partial':'unpaid';
+  let totalApplied=0;
+  const offsetSummaryParts=[];
 
-  // Update target player's payment
-  const tidx=payments.findIndex(p=>p.memberId===targetId);
-  const tentry={memberId:targetId,amountPaid:newPaid,status:newStatus,note:`Offset from ${esc((STATE.members.find(x=>x.id===payerId)||{}).name||'expense payer')} refund`,updatedAt:new Date().toISOString()};
-  if(tidx>=0)payments[tidx]=tentry;else payments.push(tentry);
+  for(const [targetId, offsetAmt] of Object.entries(selections)){
+    if(!offsetAmt||offsetAmt<0.01)continue;
+    const targetPay=payments.find(p=>p.memberId===targetId);
+    const targetPaid=targetPay?parseFloat(targetPay.amountPaid)||0:0;
+    const targetExpPaid=expensePayerTotals[targetId]||0;
+    const targetOwed=Math.max(0,perHead-targetExpPaid);
+    const applied=Math.min(offsetAmt,Math.max(0,targetOwed-targetPaid));
+    const newPaid=targetPaid+applied;
+    const newStatus=newPaid>=targetOwed?'paid':newPaid>0?'partial':'unpaid';
+    const nm=(STATE.members.find(x=>x.id===targetId)||{}).name||'?';
 
-  // Mark payer's offset amount
-  const leftover=refundAmt-applied;
+    const tidx=payments.findIndex(p=>p.memberId===targetId);
+    const tentry={memberId:targetId,amountPaid:newPaid,status:newStatus,note:`Offset from ${esc(payerName)} refund (${fmtMoney(applied)})`,updatedAt:new Date().toISOString()};
+    if(tidx>=0)payments[tidx]=tentry;else payments.push(tentry);
+
+    totalApplied+=applied;
+    offsetSummaryParts.push(`${fmtMoney(applied)} → ${esc(nm)}`);
+  }
+
+  const leftover=refundAmt-totalApplied;
   const pidx=payments.findIndex(p=>p.memberId===payerId);
-  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',note:`Refund of ${fmtMoney(refundAmt)} — ${fmtMoney(applied)} offset to ${esc((STATE.members.find(x=>x.id===targetId)||{}).name||'partner')}${leftover>0?', '+fmtMoney(leftover)+' cash return pending':''}`,updatedAt:new Date().toISOString()};
+  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',note:`Refund ${fmtMoney(refundAmt)}: ${offsetSummaryParts.join(', ')}${leftover>0.01?` · ${fmtMoney(leftover)} cash return pending`:''}`,updatedAt:new Date().toISOString()};
   if(pidx>=0)payments[pidx]=pentry;else payments.push(pentry);
 
   try{
     await updateDoc(doc(db,'sessions',sid),{payments});
     closeModal('payModal');
-    toast(`Offset applied! ${fmtMoney(applied)} deducted from partner's balance.`,'success');
+    toast(`Offset applied to ${offsetSummaryParts.length} player(s)! ${fmtMoney(totalApplied)} total.`,'success');
     loadChipinSession();
   }catch(e){ toast(e.message,'error'); }
 };
