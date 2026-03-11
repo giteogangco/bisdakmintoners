@@ -787,14 +787,16 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:18px 0}
      FIREBASE + APP LOGIC
 ============================================================ -->
 <script type="module">
-// Import the functions you need from the SDKs you need
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
 import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-analytics.js";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
+import {
+  getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp, setDoc, getDoc
+} from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
 
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+// ================================================================
+// FIREBASE CONFIG
+// ================================================================
 const firebaseConfig = {
   apiKey: "AIzaSyCSoFjdQVyzeP6Unj4rxp4SsscAO2Svmo4",
   authDomain: "bisdakmintoners.firebaseapp.com",
@@ -809,12 +811,8 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
-if (window.CONFIGURED) {
-  const app = initializeApp(firebaseConfig);
-  window.db = getFirestore(app);
-} else {
-  document.getElementById('cfgBanner').style.display = 'block';
-}
+window.CONFIGURED = true;
+window.db = getFirestore(app);
 // Local aliases so existing code works unchanged
 const CONFIGURED = window.CONFIGURED;
 let db = window.db;
