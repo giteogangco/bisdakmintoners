@@ -1685,7 +1685,9 @@ function renderChipinBody(s){
     // Total this player owes for current session:
     // perHead + carryover_debt - expenses_paid_this_session
     // carryover can be negative (credit from prev session) → reduces what they owe
-    const totalOwed=Math.max(0,perHead+carryover-expPaid);
+    const rawOwed = perHead + carryover - expPaid; // can be negative if credit > current cost
+    const totalOwed = Math.max(0, rawOwed);
+    const remainingCredit = rawOwed < 0 ? Math.abs(rawOwed) : 0; // leftover credit after covering this session
     const bal=Math.max(0,totalOwed-paid);
 
     // For expense payers: their effective refund grows if they have a carry-over credit,
@@ -1695,11 +1697,12 @@ function renderChipinBody(s){
     let status;
     if(!perHead) status='noamt';
     else if(isExpensePayer) status='refund';
+    else if(remainingCredit>0.005) status='paid'; // credit covers this session fully
     else if(paid>=totalOwed&&totalOwed>0) status='paid';
     else if(paid>0) status='partial';
     else status='unpaid';
 
-    return {aid,nm,m,paid,bal,status,perHead,carryover,totalOwed,expPaid,netRefund,effectiveRefund,isExpensePayer};
+    return {aid,nm,m,paid,bal,status,perHead,carryover,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer};
   });
   if(isMember&&myId) rows=rows.filter(r=>r.aid===myId);
 
@@ -1769,22 +1772,28 @@ function renderChipinBody(s){
           const carryDebt=Math.max(0,r.carryover);
           const carryCredit=Math.max(0,-r.carryover);
           return `
-          <div class="chipin-row ${r.status}">
+          <div class="chipin-row ${r.status}" style="${r.remainingCredit>0.005?'border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)':''}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
               <div class="m-avatar" style="width:28px;height:28px;font-size:10px;background:${avatarColor(r.nm)}22;color:${avatarColor(r.nm)}">${initials(r.nm)}</div>
               <div style="min-width:0">
                 <div style="font-size:13px;font-weight:600">${esc(r.nm)}</div>
                 <div style="font-size:10px;color:var(--text3)">
-                  Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}
+                  ${r.remainingCredit>0.005
+                    ? `This session: <span style="color:var(--green)">Fully covered by credit</span> · <span style="color:var(--green);font-weight:600">Leftover credit: ${fmtMoney(r.remainingCredit)}</span>`
+                    : `Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}`
+                  }
                   ${carryDebt>0.005?`<span style="color:var(--orange)"> (+${fmtMoney(carryDebt)} unpaid prev.)</span>`:''}
-                  ${carryCredit>0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
-                  · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>
+                  ${carryCredit>0.005&&r.remainingCredit<=0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
+                  ${r.remainingCredit<=0.005?` · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>`:''}
                 </div>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-              ${r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'}
-              ${(canAdmin()||(isMember&&r.aid===myId))?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
+              ${r.remainingCredit>0.005
+                ? `<span class="badge badge-green" style="font-size:9px">↩ ${fmtMoney(r.remainingCredit)}</span>`
+                : r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'
+              }
+              ${(canAdmin()||(isMember&&r.aid===myId))&&r.remainingCredit<=0.005?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
             </div>
           </div>`;
         }).join('')}
