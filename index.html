@@ -924,7 +924,6 @@ function gatherOutstanding(){
     const totalExp=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
     const effectivePerHead = perHead || (att.length>0 ? totalExp/att.length : 0);
     if(!effectivePerHead) return;
-    // Build expense payer totals
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     att.forEach(aid=>{
@@ -932,6 +931,8 @@ function gatherOutstanding(){
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
+      const netRefund=expPaid-effectivePerHead;
+      if(netRefund>0) return; // expense payer — they're owed money, not outstanding
       const actualOwed=Math.max(0,effectivePerHead-expPaid);
       const bal=actualOwed-paid;
       if(bal>0.005) list.push({name:nm,balance:bal,context:'Session '+fmtDate(s.date),sessionId:s.id,memberId:aid});
@@ -1231,7 +1232,7 @@ window.openSessionModal = function(){
   document.getElementById('sfCourts').value='1';
   document.getElementById('sfAdvInterval').value='0';
   document.getElementById('sfAttendees').innerHTML = STATE.members.map(m=>`
-    <div class="chip on" data-id="${m.id}" onclick="this.classList.toggle('on')">
+    <div class="chip" data-id="${m.id}" onclick="this.classList.toggle('on')">
       ${esc(m.nickname||m.name.split(' ')[0])} ${skillBadge(m.skill||'Beginner')}
     </div>
   `).join('');
@@ -1649,25 +1650,32 @@ function renderChipinBody(s){
     const pay=payments.find(p=>p.memberId===aid);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const carryover=getCarryover(aid);
-    const totalOwed=perHead+(carryover>0?carryover:0);
-    const expPaid=expensePayerTotals[aid]||0; // amount this player paid for group expenses
-    // Net: if they paid expenses, they're owed back (expPaid - perHead); if positive they get refund
-    const netRefund=expPaid-totalOwed; // positive = group owes them; negative = they still owe
-    const bal=netRefund>=0?0:Math.abs(netRefund)-(paid); // if payer, bal is 0 or negative (to receive)
-    const isExpensePayer=expPaid>0;
+    const expPaid=expensePayerTotals[aid]||0;
+
+    // netRefund = what the group owes them back = expenses they paid OUT minus their own share (perHead only)
+    // carryover is a separate outstanding debt and does NOT reduce the expense refund
+    const netRefund=expPaid-perHead; // positive = group owes them cash back
+
+    const isExpensePayer=expPaid>0&&netRefund>0;
+
+    // For non-expense-payers (or partial payers who still owe): what they owe = perHead + carryover - expPaid
+    const totalOwed=Math.max(0,perHead+Math.max(0,carryover)-expPaid);
+    const bal=Math.max(0,totalOwed-paid);
+
     let status;
     if(!perHead) status='noamt';
-    else if(isExpensePayer && netRefund>=0) status='refund'; // they covered more than their share
-    else if(paid>=(totalOwed-expPaid)&&(totalOwed-expPaid)>0) status='paid';
+    else if(isExpensePayer) status='refund';
+    else if(paid>=totalOwed&&totalOwed>0) status='paid';
     else if(paid>0) status='partial';
     else status='unpaid';
+
     return {aid,nm,m,paid,bal,status,perHead,carryover,totalOwed,expPaid,netRefund,isExpensePayer};
   });
   if(isMember&&myId) rows=rows.filter(r=>r.aid===myId);
 
   // Separate expense payers (to return) from normal payers
-  const expPayerRows=rows.filter(r=>r.isExpensePayer&&r.netRefund>=0);
-  const normalRows=rows.filter(r=>!(r.isExpensePayer&&r.netRefund>=0));
+  const expPayerRows=rows.filter(r=>r.isExpensePayer);
+  const normalRows=rows.filter(r=>!r.isExpensePayer);
 
   el.innerHTML=`
     <div class="card">
@@ -1737,7 +1745,6 @@ function renderChipinBody(s){
           Players — To Pay
         </div>
         ${normalRows.map(r=>{
-          const actualOwed=r.totalOwed-r.expPaid;
           return `
           <div class="chipin-row ${r.status}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
@@ -1745,16 +1752,15 @@ function renderChipinBody(s){
               <div style="min-width:0">
                 <div style="font-size:13px;font-weight:600">${esc(r.nm)}</div>
                 <div style="font-size:10px;color:var(--text3)">
-                  Paid ${fmtMoney(r.paid)} of ${fmtMoney(Math.max(0,actualOwed))}
+                  Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}
                   ${r.carryover>0?`<span style="color:var(--orange)"> (+${fmtMoney(r.carryover)} carry-over)</span>`:''}
-                  ${r.expPaid>0?`<span style="color:var(--primary)"> (−${fmtMoney(r.expPaid)} exp. offset)</span>`:''}
-                  · Bal <span style="color:${(Math.max(0,actualOwed)-r.paid)>0?'var(--red)':'var(--green)'}">${fmtMoney(Math.max(0,Math.max(0,actualOwed)-r.paid))}</span>
+                  · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>
                 </div>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
               ${r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'}
-              ${(canAdmin()||(isMember&&r.aid===myId))?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${Math.max(0,actualOwed)})">Pay</button>`:''}
+              ${(canAdmin()||(isMember&&r.aid===myId))?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
             </div>
           </div>`;
         }).join('')}
@@ -1778,9 +1784,11 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   const eligiblePlayers=att.filter(aid=>{
     if(aid===payerId)return false;
     const expPaid=expensePayerTotals[aid]||0;
+    const netRef=expPaid-perHead;
+    if(netRef>0)return false; // also an expense payer with refund — skip
     const pay=payments.find(p=>p.memberId===aid);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
-    const owed=perHead-expPaid;
+    const owed=Math.max(0,perHead-expPaid);
     return owed-paid>0.01;
   }).map(aid=>{
     const m=STATE.members.find(x=>x.id===aid);
