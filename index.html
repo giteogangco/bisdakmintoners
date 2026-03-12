@@ -917,7 +917,9 @@ function renderLatestSessionCard(s){
 }
 
 function gatherOutstanding(){
-  const list=[];
+  // Aggregate total owed per member across all sessions + projects
+  const memberTotals={}; // memberId -> {name, sessionBal, projectBal}
+
   STATE.sessions.forEach(s=>{
     const att=s.attendees||[];const perHead=parseFloat(s.perHead)||0;
     const expenses=s.expenses||[];
@@ -932,38 +934,54 @@ function gatherOutstanding(){
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
       const netRefund=expPaid-effectivePerHead;
-      if(netRefund>0) return; // expense payer — they're owed money, not outstanding
+      if(netRefund>0) return; // expense payer — owed money, not a debtor
       const actualOwed=Math.max(0,effectivePerHead-expPaid);
       const bal=actualOwed-paid;
-      if(bal>0.005) list.push({name:nm,balance:bal,context:'Session '+fmtDate(s.date),sessionId:s.id,memberId:aid});
+      if(bal>0.005){
+        if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0};
+        memberTotals[aid].sessionBal+=bal;
+      }
     });
   });
+
   STATE.projects.forEach(p=>{
     (p.members||[]).forEach(pm=>{
       const m=STATE.members.find(x=>x.id===pm.memberId);const nm=m?m.name:'?';
       const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
-      if(bal>0.005) list.push({name:nm,balance:bal,context:'Project: '+esc(p.name)});
+      if(bal>0.005){
+        if(!memberTotals[pm.memberId]) memberTotals[pm.memberId]={name:nm,sessionBal:0,projectBal:0};
+        memberTotals[pm.memberId].projectBal+=bal;
+      }
     });
   });
-  return list.sort((a,b)=>b.balance-a.balance);
+
+  return Object.entries(memberTotals).map(([id,d])=>({
+    memberId:id, name:d.name,
+    sessionBal:d.sessionBal, projectBal:d.projectBal,
+    balance:d.sessionBal+d.projectBal
+  })).sort((a,b)=>b.balance-a.balance);
 }
 
 function renderOutstandingList(list){
   if(!list.length) return '<div class="empty" style="padding:16px"><div class="empty-icon">✅</div><div class="empty-text">All settled!</div></div>';
-  return list.slice(0,8).map(o=>`
-    <div class="chipin-row unpaid">
-      <div style="display:flex;align-items:center;gap:8px">
+  return list.slice(0,10).map(o=>`
+    <div class="chipin-row unpaid" style="margin-bottom:5px">
+      <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
         <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(o.name)}22;color:${avatarColor(o.name)}">${initials(o.name)}</div>
-        <div>
+        <div style="min-width:0">
           <div style="font-size:12px;font-weight:600">${esc(o.name)}</div>
-          <div style="font-size:10px;color:var(--text3)">${esc(o.context)}</div>
+          <div style="font-size:10px;color:var(--text3)">
+            ${o.sessionBal>0.005?`<span>💸 Sessions: ${fmtMoney(o.sessionBal)}</span>`:''}
+            ${o.sessionBal>0.005&&o.projectBal>0.005?' · ':''}
+            ${o.projectBal>0.005?`<span>📋 Projects: ${fmtMoney(o.projectBal)}</span>`:''}
+          </div>
         </div>
       </div>
-      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:13px;font-weight:700">${fmtMoney(o.balance)}</span>
+      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:14px;font-weight:700;flex-shrink:0">${fmtMoney(o.balance)}</span>
     </div>
-  `).join('')+(list.length>8?`<div style="font-size:10px;color:var(--text3);text-align:center;padding:6px">+${list.length-8} more</div>`:'');
+  `).join('')+(list.length>10?`<div style="font-size:10px;color:var(--text3);text-align:center;padding:6px">+${list.length-10} more</div>`:'');
 }
 
 // ============ MEMBERS ============
@@ -2215,12 +2233,12 @@ window.showProjectDetail = function(pid){
         </div>
         <div style="display:flex;gap:5px;align-items:center">
           ${status==='paid'?'<span class="badge badge-green">Paid</span>':status==='partial'?'<span class="badge badge-gold">Partial</span>':status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':''}
-          ${(canEdit||(isMember&&pm.memberId===myId))?`<button class="btn btn-ghost btn-xs" onclick="openProjectPayModal('${p.id}','${pm.memberId}','${esc(nm)}',${paid},${due})">Pay</button>`:''}
+          ${(canEdit||(isMember&&pm.memberId===myId))?`<button class="btn btn-ghost btn-xs" onclick="closeModal('detailModal');openProjectPayModal('${p.id}','${pm.memberId}','${esc(nm)}',${paid},${due})">Pay</button>`:''}
         </div>
       </div>`;
     }).join('')}
     ${canEdit?`<hr class="divider"><div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="openProjectModal('${p.id}')">Edit</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('detailModal');openProjectModal('${p.id}')">Edit</button>
       <button class="btn btn-red btn-sm" onclick="deleteProject('${p.id}','${esc(p.name)}')">Delete</button>
     </div>`:''}
   `;
@@ -2233,7 +2251,7 @@ window.openProjectPayModal = function(pid,mid,mname,currentPaid,due){
       <div style="font-size:14px;font-weight:600">${esc(mname)}</div>
       <div style="font-size:12px;color:var(--text3)">Due: ${fmtMoney(due)} · Paid: ${fmtMoney(currentPaid)}</div>
     </div>
-    <div class="form-group"><label class="form-label">Amount Paid (₱)</label>
+    <div class="form-group"><label class="form-label">Amount Paid (AED)</label>
       <input type="number" class="form-input" id="ppAmt" value="${currentPaid}" min="0" step="0.01" inputmode="decimal"/>
     </div>
     <div class="form-group"><label class="form-label">Custom Due Amount (override)</label>
@@ -2241,7 +2259,7 @@ window.openProjectPayModal = function(pid,mid,mname,currentPaid,due){
     </div>
     <div class="modal-footer" style="margin-top:0;padding-bottom:0">
       ${due?`<button class="btn btn-green btn-sm" onclick="document.getElementById('ppAmt').value=${due}">Full</button>`:''}
-      <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
+      <button class="btn btn-ghost" onclick="closeModal('payModal');showProjectDetail('${pid}')">Cancel</button>
       <button class="btn btn-primary" onclick="saveProjectPayment('${pid}','${mid}')">Save</button>
     </div>
   `;
@@ -2257,7 +2275,10 @@ window.saveProjectPayment = async function(pid,mid){
   if(idx>=0) members[idx]={...members[idx],amountPaid:amt,fixedAmount:due,updatedAt:new Date().toISOString()};
   try{
     await updateDoc(doc(db,'projects',pid),{members});
-    closeModal('payModal');toast('Payment saved!','success');showProjectDetail(pid);
+    closeModal('payModal');
+    toast('Payment saved!','success');
+    showProjectDetail(pid);
+    openModal('detailModal');
   }catch(e){ toast(e.message,'error'); }
 };
 
@@ -2293,9 +2314,17 @@ window.saveProject = async function(){
   const members=selectedIds.map(mid=>{ const ex=existing.find(m=>m.memberId===mid); return ex||{memberId:mid,amountPaid:0,fixedAmount:fixedAmt}; });
   const data={name,description:document.getElementById('pfDesc').value.trim(),targetDate:document.getElementById('pfDate').value,status:document.getElementById('pfStatus').value,fixedAmount:fixedAmt,totalCost:parseFloat(document.getElementById('pfTotal').value)||0,members};
   try{
-    if(STATE.editingProjectId){ await updateDoc(doc(db,'projects',STATE.editingProjectId),data); toast('Updated','success'); }
-    else { await addDoc(collection(db,'projects'),{...data,createdAt:serverTimestamp()}); toast('Created!','success'); }
-    closeModal('projectModal'); closeModal('detailModal');
+    if(STATE.editingProjectId){
+      await updateDoc(doc(db,'projects',STATE.editingProjectId),data);
+      toast('Updated','success');
+      closeModal('projectModal');
+      showProjectDetail(STATE.editingProjectId);
+      openModal('detailModal');
+    } else {
+      await addDoc(collection(db,'projects'),{...data,createdAt:serverTimestamp()});
+      toast('Created!','success');
+      closeModal('projectModal');
+    }
   }catch(e){ toast(e.message,'error'); }
 };
 
