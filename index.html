@@ -917,31 +917,46 @@ function renderLatestSessionCard(s){
 }
 
 function gatherOutstanding(){
-  // Aggregate total owed per member across all sessions + projects
-  const memberTotals={}; // memberId -> {name, sessionBal, projectBal}
+  // Compute net balance per member across ALL sessions (respects carry-over credits)
+  // then add project balances. Members with net credit are excluded.
+  const memberNames={};
+  STATE.members.forEach(m=>{ memberNames[m.id]=m.name; });
 
-  STATE.sessions.forEach(s=>{
-    const att=s.attendees||[];const perHead=parseFloat(s.perHead)||0;
+  const sessionNetBal={}; // memberId -> net AED (positive=owes, negative=credit)
+
+  const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  sortedSessions.forEach(s=>{
+    const att=s.attendees||[];
     const expenses=s.expenses||[];
     const totalExp=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const effectivePerHead = perHead || (att.length>0 ? totalExp/att.length : 0);
-    if(!effectivePerHead) return;
+    const perHead=parseFloat(s.perHead)||(att.length>0?totalExp/att.length:0);
+    if(!perHead) return;
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     att.forEach(aid=>{
-      const m=STATE.members.find(x=>x.id===aid);const nm=m?m.name:'?';
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
-      const netRefund=expPaid-effectivePerHead;
-      if(netRefund>0) return; // expense payer — owed money, not a debtor
-      const actualOwed=Math.max(0,effectivePerHead-expPaid);
-      const bal=actualOwed-paid;
-      if(bal>0.005){
-        if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0};
-        memberTotals[aid].sessionBal+=bal;
+      const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+      const netRefund=expPaid-perHead;
+      let delta;
+      if(netRefund>0){
+        // Expense payer: unrecovered refund = credit for them
+        delta=-Math.max(0,netRefund-refundApplied);
+      } else {
+        delta=Math.max(0,perHead-expPaid)-paid;
       }
+      sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
     });
+  });
+
+  const memberTotals={};
+  Object.entries(sessionNetBal).forEach(([aid,netBal])=>{
+    if(netBal>0.005){
+      const nm=memberNames[aid]||'?';
+      if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0};
+      memberTotals[aid].sessionBal=netBal;
+    }
   });
 
   STATE.projects.forEach(p=>{
@@ -961,7 +976,7 @@ function gatherOutstanding(){
     memberId:id, name:d.name,
     sessionBal:d.sessionBal, projectBal:d.projectBal,
     balance:d.sessionBal+d.projectBal
-  })).sort((a,b)=>b.balance-a.balance);
+  })).filter(o=>o.balance>0.005).sort((a,b)=>b.balance-a.balance);
 }
 
 function renderOutstandingList(list){
