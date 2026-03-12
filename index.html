@@ -552,7 +552,7 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
           <option value="other">📦 Other</option>
         </select>
       </div>
-      <div class="form-group"><label class="form-label">Amount (₱) *</label>
+      <div class="form-group"><label class="form-label">Amount (AED) *</label>
         <input type="number" class="form-input" id="efAmount" placeholder="0.00" min="0" step="0.01" inputmode="decimal"/>
       </div>
     </div>
@@ -604,8 +604,8 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Fixed Amount/Member (₱)</label><input type="number" class="form-input" id="pfFixed" placeholder="0 = custom" min="0" step="0.01" inputmode="decimal"/></div>
-      <div class="form-group"><label class="form-label">Total Project Cost (₱)</label><input type="number" class="form-input" id="pfTotal" placeholder="Optional" min="0" step="0.01" inputmode="decimal"/></div>
+      <div class="form-group"><label class="form-label">Fixed Amount/Member (AED)</label><input type="number" class="form-input" id="pfFixed" placeholder="0 = custom" min="0" step="0.01" inputmode="decimal"/></div>
+      <div class="form-group"><label class="form-label">Total Project Cost (AED)</label><input type="number" class="form-input" id="pfTotal" placeholder="Optional" min="0" step="0.01" inputmode="decimal"/></div>
     </div>
     <div class="form-section">Participants</div>
     <div style="display:flex;gap:6px;margin-bottom:8px">
@@ -693,7 +693,7 @@ function skillBadge(s){
   return '<span class="badge badge-beg">BEG</span>';
 }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function fmtDate(d){ if(!d)return'—'; try{const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});}catch{return d;} }
+function fmtDate(d){ if(!d)return'—'; try{const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString('en-AE',{year:'numeric',month:'short',day:'numeric'});}catch{return d;} }
 function fmtMoney(n){ return 'AED '+(parseFloat(n)||0).toLocaleString('en-AE',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function canAdmin(){ return ['superadmin','admin'].includes(STATE.role); }
 function uid(){ return 'm'+Date.now()+Math.floor(Math.random()*10000); }
@@ -833,7 +833,7 @@ function buildNav(){
   `).join('');
 }
 
-function getDefaultPage(){ return STATE.role==='member' ? 'queue' : 'dashboard'; }
+function getDefaultPage(){ return 'dashboard'; }
 
 window.navigateTo = function(page){
   closeMoreMenu();
@@ -966,7 +966,7 @@ function gatherOutstanding(){
 
 function renderOutstandingList(list){
   if(!list.length) return '<div class="empty" style="padding:16px"><div class="empty-icon">✅</div><div class="empty-text">All settled!</div></div>';
-  return list.slice(0,10).map(o=>`
+  return list.map(o=>`
     <div class="chipin-row unpaid" style="margin-bottom:5px">
       <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
         <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(o.name)}22;color:${avatarColor(o.name)}">${initials(o.name)}</div>
@@ -981,7 +981,7 @@ function renderOutstandingList(list){
       </div>
       <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:14px;font-weight:700;flex-shrink:0">${fmtMoney(o.balance)}</span>
     </div>
-  `).join('')+(list.length>10?`<div style="font-size:10px;color:var(--text3);text-align:center;padding:6px">+${list.length-10} more</div>`:'');
+  `).join('');
 }
 
 // ============ MEMBERS ============
