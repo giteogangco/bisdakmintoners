@@ -1630,7 +1630,9 @@ function renderChipinBody(s){
     }
   });
 
-  // Carry-over balance from previous sessions
+  // Net carry-over from previous sessions:
+  // Positive = still owes money (unpaid balance from past session)
+  // Negative = has a credit (overpaid, or was an expense payer with unrecovered refund)
   function getCarryover(memberId){
     let carry=0;
     STATE.sessions.filter(x=>x.id!==s.id&&new Date(x.date)<new Date(s.date)).forEach(ps=>{
@@ -1638,29 +1640,57 @@ function renderChipinBody(s){
       const pexp=(ps.expenses||[]).reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
       const pph=parseFloat(ps.perHead)||(patt.length>0?pexp/patt.length:0);
       if(!pph)return;
+
+      // How much did this member pay for expenses in this past session?
+      const prevExpPayerTotals={};
+      (ps.expenses||[]).forEach(e=>{ if(e.paidBy) prevExpPayerTotals[e.paidBy]=(prevExpPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+      const prevExpPaid=prevExpPayerTotals[memberId]||0;
+
+      // What they actually owed for that session (their share minus any expenses they covered)
+      const prevOwed=Math.max(0,pph-prevExpPaid);
+
+      // How much did they pay/record as paid
       const ppay=(ps.payments||[]).find(p=>p.memberId===memberId);
       const ppaid=ppay?parseFloat(ppay.amountPaid)||0:0;
-      carry+=pph-ppaid;
+
+      // How much of their refund was already offset to others (if they were an expense payer)
+      const prevRefundApplied=ppay?parseFloat(ppay.refundApplied)||0:0;
+
+      // If they were an expense payer: their net position = -(netRefund - refundApplied)
+      // i.e. if they have an unrecovered refund, that's a credit (negative carry-over)
+      const prevNetRefund=prevExpPaid-pph; // positive = group owes them
+      if(prevNetRefund>0){
+        // They are/were an expense payer in that session
+        const unrecoveredRefund=Math.max(0,prevNetRefund-prevRefundApplied);
+        carry -= unrecoveredRefund; // credit — reduces what they owe in future sessions
+      } else {
+        // Normal player — carry over any unpaid balance
+        carry += prevOwed - ppaid;
+      }
     });
-    return carry;
+    return carry; // negative = credit, positive = debt
   }
 
   let rows=att.map(aid=>{
     const m=STATE.members.find(x=>x.id===aid);const nm=m?m.name:'?';
     const pay=payments.find(p=>p.memberId===aid);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
-    const carryover=getCarryover(aid);
+    const carryover=getCarryover(aid); // can be negative (credit) or positive (debt)
     const expPaid=expensePayerTotals[aid]||0;
 
-    // netRefund = what the group owes them back = expenses they paid OUT minus their own share (perHead only)
-    // carryover is a separate outstanding debt and does NOT reduce the expense refund
+    // Net refund for THIS session = expenses paid out minus their own per-head share
     const netRefund=expPaid-perHead; // positive = group owes them cash back
-
     const isExpensePayer=expPaid>0&&netRefund>0;
 
-    // For non-expense-payers (or partial payers who still owe): what they owe = perHead + carryover - expPaid
-    const totalOwed=Math.max(0,perHead+Math.max(0,carryover)-expPaid);
+    // Total this player owes for current session:
+    // perHead + carryover_debt - expenses_paid_this_session
+    // carryover can be negative (credit from prev session) → reduces what they owe
+    const totalOwed=Math.max(0,perHead+carryover-expPaid);
     const bal=Math.max(0,totalOwed-paid);
+
+    // For expense payers: their effective refund grows if they have a carry-over credit,
+    // or shrinks if they have a carry-over debt
+    const effectiveRefund=isExpensePayer?Math.max(0,netRefund-Math.max(0,carryover)):0;
 
     let status;
     if(!perHead) status='noamt';
@@ -1669,7 +1699,7 @@ function renderChipinBody(s){
     else if(paid>0) status='partial';
     else status='unpaid';
 
-    return {aid,nm,m,paid,bal,status,perHead,carryover,totalOwed,expPaid,netRefund,isExpensePayer};
+    return {aid,nm,m,paid,bal,status,perHead,carryover,totalOwed,expPaid,netRefund,effectiveRefund,isExpensePayer};
   });
   if(isMember&&myId) rows=rows.filter(r=>r.aid===myId);
 
@@ -1695,15 +1725,16 @@ function renderChipinBody(s){
           💳 Expense Payer(s) — To Receive Back
         </div>
         ${expPayerRows.map(r=>{
-          // Compute how much of the refund has already been applied to other players as offsets.
-          // We read the stored refundApplied field from the payer's payment record (set by applyRefundOffset).
           const payerPayRec=payments.find(p=>p.memberId===r.aid);
           const alreadyApplied=payerPayRec?parseFloat(payerPayRec.refundApplied)||0:0;
-          const displayRefund=Math.max(0,r.netRefund-alreadyApplied);
-          const fullySettled=alreadyApplied>=r.netRefund-0.005;
-          const offsetNotes=payments
-            .filter(p=>p.memberId!==r.aid&&(p.note||'').toLowerCase().includes('offset from '+r.nm.split(' ')[0].toLowerCase()))
-            .map(p=>{const nm2=(STATE.members.find(x=>x.id===p.memberId)||{}).name||'?';return esc(nm2.split(' ')[0])+' −'+fmtMoney(parseFloat((p.note||'').match(/\((AED[\s\d.,]+)\)/)?.[1]?.replace('AED',''))||0);});
+          // Base refund = expPaid - perHead, adjusted for carry-over debt (if they owed from prev session)
+          const baseRefund=r.netRefund; // expPaid - perHead
+          const carryDebt=Math.max(0,r.carryover); // positive = they owe from prev session
+          const carryCredit=Math.max(0,-r.carryover); // negative carryover = credit
+          // Effective refund = netRefund - carry-over debt + carry-over credit - already offset
+          const effectiveTotal=Math.max(0,baseRefund-carryDebt+carryCredit);
+          const displayRefund=Math.max(0,effectiveTotal-alreadyApplied);
+          const fullySettled=alreadyApplied>=effectiveTotal-0.005&&effectiveTotal>0;
           return `
           <div class="chipin-row" style="border-color:${fullySettled?'rgba(0,232,153,0.3)':'rgba(0,212,255,0.3)'};background:${fullySettled?'rgba(0,232,153,0.04)':'rgba(0,212,255,0.04)'}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
@@ -1711,12 +1742,13 @@ function renderChipinBody(s){
               <div style="min-width:0">
                 <div style="font-size:13px;font-weight:600">${esc(r.nm)} <span class="badge badge-primary" style="font-size:9px;vertical-align:middle">Paid Expenses</span></div>
                 <div style="font-size:10px;color:var(--text3)">
-                  Paid expenses: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span>
-                  · Their share: <span style="color:var(--text2)">${fmtMoney(r.perHead)}</span>
-                  · <span style="color:${fullySettled?'var(--green)':'var(--gold)'};font-weight:600">${fullySettled?'Fully Settled ✓':'Return: '+fmtMoney(displayRefund)}</span>
+                  Paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span>
+                  · Share: <span style="color:var(--text2)">${fmtMoney(r.perHead)}</span>
+                  · Base refund: <span style="color:var(--text2)">${fmtMoney(baseRefund)}</span>
                 </div>
+                ${carryDebt>0.005?`<div style="font-size:10px;color:var(--orange);margin-top:2px">⚠ Carry-over debt: −${fmtMoney(carryDebt)} → Net return: <strong style="color:var(--gold)">${fmtMoney(Math.max(0,baseRefund-carryDebt))}</strong></div>`:''}
+                ${carryCredit>0.005?`<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Carry-over credit: +${fmtMoney(carryCredit)} → Net return: <strong style="color:var(--green)">${fmtMoney(effectiveTotal)}</strong></div>`:''}
                 ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Cash pending: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
-                ${r.carryover>0?`<div style="font-size:10px;color:var(--orange);margin-top:2px">Carry-over debt: +${fmtMoney(r.carryover)} (separate from refund)</div>`:''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -1734,6 +1766,8 @@ function renderChipinBody(s){
           Players — To Pay
         </div>
         ${normalRows.map(r=>{
+          const carryDebt=Math.max(0,r.carryover);
+          const carryCredit=Math.max(0,-r.carryover);
           return `
           <div class="chipin-row ${r.status}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
@@ -1742,7 +1776,8 @@ function renderChipinBody(s){
                 <div style="font-size:13px;font-weight:600">${esc(r.nm)}</div>
                 <div style="font-size:10px;color:var(--text3)">
                   Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}
-                  ${r.carryover>0?`<span style="color:var(--orange)"> (+${fmtMoney(r.carryover)} carry-over)</span>`:''}
+                  ${carryDebt>0.005?`<span style="color:var(--orange)"> (+${fmtMoney(carryDebt)} unpaid prev.)</span>`:''}
+                  ${carryCredit>0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
                   · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>
                 </div>
               </div>
