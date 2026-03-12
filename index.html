@@ -1695,26 +1695,15 @@ function renderChipinBody(s){
           💳 Expense Payer(s) — To Receive Back
         </div>
         ${expPayerRows.map(r=>{
-          // Calculate how much has already been offset (from payment notes/status)
+          // Compute how much of the refund has already been applied to other players as offsets.
+          // We read the stored refundApplied field from the payer's payment record (set by applyRefundOffset).
           const payerPayRec=payments.find(p=>p.memberId===r.aid);
-          const alreadyOffset=payerPayRec&&payerPayRec.status==='refund-offset';
-          // Compute total already applied to others on behalf of this payer
-          const alreadyApplied = alreadyOffset ? (()=>{
-            // Sum up what was applied: we re-derive from other players' payment notes mentioning this payer
-            let applied=0;
-            payments.forEach(p=>{
-              if(p.memberId===r.aid)return;
-              if((p.note||'').includes(esc(r.nm))||((p.note||'').toLowerCase().includes('offset from')&&(p.note||'').includes(r.nm.split(' ')[0])))
-                applied=0; // fallback: trust the stored refund remaining from note
-            });
-            // Parse leftover from note if present
-            const noteMatch=(payerPayRec.note||'').match(/cash return pending/);
-            if(!noteMatch) return r.netRefund; // all covered
-            const m2=(payerPayRec.note||'').match(/(\d[\d,.]*)\s*cash return/);
-            return m2?parseFloat(m2[1].replace(/,/g,'')):r.netRefund;
-          })() : r.netRefund;
-          const displayRefund=alreadyOffset?alreadyApplied:r.netRefund;
-          const fullySettled=alreadyOffset&&displayRefund<0.01;
+          const alreadyApplied=payerPayRec?parseFloat(payerPayRec.refundApplied)||0:0;
+          const displayRefund=Math.max(0,r.netRefund-alreadyApplied);
+          const fullySettled=alreadyApplied>=r.netRefund-0.005;
+          const offsetNotes=payments
+            .filter(p=>p.memberId!==r.aid&&(p.note||'').toLowerCase().includes('offset from '+r.nm.split(' ')[0].toLowerCase()))
+            .map(p=>{const nm2=(STATE.members.find(x=>x.id===p.memberId)||{}).name||'?';return esc(nm2.split(' ')[0])+' −'+fmtMoney(parseFloat((p.note||'').match(/\((AED[\s\d.,]+)\)/)?.[1]?.replace('AED',''))||0);});
           return `
           <div class="chipin-row" style="border-color:${fullySettled?'rgba(0,232,153,0.3)':'rgba(0,212,255,0.3)'};background:${fullySettled?'rgba(0,232,153,0.04)':'rgba(0,212,255,0.04)'}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
@@ -1723,11 +1712,11 @@ function renderChipinBody(s){
                 <div style="font-size:13px;font-weight:600">${esc(r.nm)} <span class="badge badge-primary" style="font-size:9px;vertical-align:middle">Paid Expenses</span></div>
                 <div style="font-size:10px;color:var(--text3)">
                   Paid expenses: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span>
-                  · Their share: ${fmtMoney(r.totalOwed)}
+                  · Their share: <span style="color:var(--text2)">${fmtMoney(r.perHead)}</span>
                   · <span style="color:${fullySettled?'var(--green)':'var(--gold)'};font-weight:600">${fullySettled?'Fully Settled ✓':'Return: '+fmtMoney(displayRefund)}</span>
                 </div>
-                ${alreadyOffset&&!fullySettled?`<div style="font-size:10px;color:var(--text3);margin-top:2px">${(payerPayRec.note||'').replace(/AED /g,'AED ')}</div>`:''}
-                ${r.carryover>0?`<div style="font-size:10px;color:var(--orange)">(+${fmtMoney(r.carryover)} carry-over included)</div>`:''}
+                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Cash pending: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
+                ${r.carryover>0?`<div style="font-size:10px;color:var(--orange);margin-top:2px">Carry-over debt: +${fmtMoney(r.carryover)} (separate from refund)</div>`:''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -1926,9 +1915,13 @@ window.applyRefundOffset = async function(){
     offsetSummaryParts.push(`${fmtMoney(applied)} → ${esc(nm)}`);
   }
 
-  const leftover=refundAmt-totalApplied;
+  // Mark payer's record with cumulative refundApplied amount
+  const prevApplied=payments.find(p=>p.memberId===payerId);
+  const prevRefundApplied=prevApplied?parseFloat(prevApplied.refundApplied)||0:0;
+  const newRefundApplied=prevRefundApplied+totalApplied;
+  const leftover=refundAmt+prevRefundApplied - newRefundApplied; // remaining after this batch (relative to original full refund — but we pass current displayRefund so this is correct)
   const pidx=payments.findIndex(p=>p.memberId===payerId);
-  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',note:`Refund ${fmtMoney(refundAmt)}: ${offsetSummaryParts.join(', ')}${leftover>0.01?` · ${fmtMoney(leftover)} cash return pending`:''}`,updatedAt:new Date().toISOString()};
+  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',refundApplied:newRefundApplied,note:`Refund offsets: ${offsetSummaryParts.join(', ')}`,updatedAt:new Date().toISOString()};
   if(pidx>=0)payments[pidx]=pentry;else payments.push(pentry);
 
   try{
@@ -2293,6 +2286,7 @@ function renderHistoryCard(s){
         <span class="badge badge-primary">👥 ${att.length}</span>
         ${perHead?`<span class="badge badge-gold">${fmtMoney(perHead)}/head</span>`:''}
         ${matches.length?`<span class="badge badge-ghost">🏸 ${matches.length}</span>`:''}
+        ${canAdmin()?`<button class="btn btn-red btn-xs" style="margin-left:4px" onclick="deleteSession('${s.id}','${esc(fmtDate(s.date))}')">🗑</button>`:''}
       </div>
     </div>
     <div class="table-wrap">
@@ -2369,8 +2363,18 @@ window.showSessionDetail = function(sid){
         <span style="color:var(--red);font-family:'Barlow Condensed',sans-serif">${fmtMoney(e.amount)} ${pb?'('+esc(pb.name.split(' ')[0])+')':''}</span>
       </div>`;}).join('')}
     `:''}
+    ${canAdmin()?`<hr class="divider"><button class="btn btn-red btn-sm btn-block" onclick="deleteSession('${s.id}','${esc(fmtDate(s.date))}')">🗑 Delete This Session</button>`:''}
   `;
   openModal('detailModal');
+};
+
+window.deleteSession = async function(sid, label){
+  if(!confirm(`Delete session "${label}"?\n\nThis will permanently remove all match results, expenses, and payment records for this session. This cannot be undone.`)) return;
+  try{
+    await deleteDoc(doc(db,'sessions',sid));
+    closeModal('detailModal');
+    toast('Session deleted','success');
+  }catch(e){ toast(e.message,'error'); }
 };
 
 // ============ SETTINGS ============
