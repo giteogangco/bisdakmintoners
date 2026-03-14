@@ -534,6 +534,42 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
   </div>
 </div>
 
+<!-- Custom Match Modal -->
+<div class="modal-overlay" id="customMatchModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <div class="modal-title">⚙️ Custom Match</div>
+      <button class="modal-close" onclick="closeModal('customMatchModal')">✕</button>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Select exactly 4 players — first 2 selected = Team A, next 2 = Team B. Tap again to deselect.</div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <div style="flex:1;background:var(--surface2);border-radius:8px;padding:8px">
+        <div style="font-size:10px;font-weight:700;color:var(--primary);margin-bottom:6px">TEAM A</div>
+        <div id="cmTeamA" style="min-height:36px;display:flex;flex-direction:column;gap:4px"></div>
+      </div>
+      <div style="display:flex;align-items:center;font-family:'Bebas Neue',sans-serif;color:var(--gold);font-size:20px">VS</div>
+      <div style="flex:1;background:var(--surface2);border-radius:8px;padding:8px">
+        <div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:6px">TEAM B</div>
+        <div id="cmTeamB" style="min-height:36px;display:flex;flex-direction:column;gap:4px"></div>
+      </div>
+    </div>
+    <div class="card-title" style="margin-bottom:6px">Select Players</div>
+    <div class="chip-group" id="cmPlayerChips"></div>
+    <div class="form-group" style="margin-top:10px">
+      <label class="form-label">Match Type</label>
+      <select class="form-input" id="cmMatchType">
+        <option value="regular">🏸 Regular</option>
+        <option value="advanced">⚔️ Advanced Battle</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('customMatchModal')">Cancel</button>
+      <button class="btn btn-primary" id="cmSaveBtn" onclick="saveCustomMatch()" disabled>Start Match</button>
+    </div>
+  </div>
+</div>
+
 <!-- Expense Modal -->
 <div class="modal-overlay" id="expenseModal">
   <div class="modal">
@@ -1131,7 +1167,8 @@ function renderQueueBody(s){
   const advInterval = parseInt(s.advInterval)||0;
   const isAdmin = canAdmin();
   const completedMatches = matches.filter(m=>m.result);
-  const activeMatches = matches.filter(m=>!m.result);
+  const activeMatches = matches.filter(m=>!m.result && !m.scheduled);
+  const scheduledQueue = matches.filter(m=>!m.result && m.scheduled);
 
   let html = '';
 
@@ -1143,6 +1180,7 @@ function renderQueueBody(s){
         <span class="badge badge-ghost" style="margin-left:4px">🏟️ ${numCourts} court${numCourts>1?'s':''}</span>
         ${advInterval>0?`<span class="badge badge-adv" style="margin-left:4px">⚔️ ADV every ${advInterval}</span>`:''}
         <span class="badge badge-ghost" style="margin-left:4px">🏸 ${completedMatches.length} played</span>
+        ${scheduledQueue.length>0?`<span class="badge badge-primary" style="margin-left:4px">📋 ${scheduledQueue.length} queued</span>`:''}
       </div>
       ${isAdmin?`<div style="display:flex;gap:6px;flex-wrap:wrap">
         <button class="btn btn-ghost btn-sm" onclick="openLatePlayerModal('${s.id}')">+ Late Player</button>
@@ -1197,21 +1235,28 @@ function renderQueueBody(s){
 
   // ---- Generate Matches Button ----
   if(isAdmin){
-    const canGenerate = activeMatches.length < numCourts && queue.filter(id=>{
-      const onCourt = activeMatches.some(m=>(m.team1||[]).concat(m.team2||[]).includes(id));
-      return !onCourt;
-    }).length >= 4;
+    const onCourtNow = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
+    const availableForNext = queue.filter(id=>!onCourtNow.includes(id));
+    // Can start next match if: a court is free AND (there's a scheduled match queued OR 4+ free players)
+    const canGenerate = activeMatches.length < numCourts && (scheduledQueue.length > 0 || availableForNext.length >= 4);
+    const canSchedule = availableForNext.length >= 4 && scheduledQueue.length === 0;
 
-    const nextMatchNum = completedMatches.length + activeMatches.length + 1;
+    const nextMatchNum = completedMatches.length + activeMatches.length + scheduledQueue.length + 1;
     const isNextAdv = advInterval>0 && nextMatchNum % advInterval === 0;
     const advPlayersAvail = att.filter(id=>{const m=STATE.members.find(x=>x.id===id);return m?.skill==='Advanced';}).length;
 
     html += `<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <button class="btn btn-gold btn-sm" onclick="generateMatchup('${s.id}')" ${canGenerate?'':'disabled'}>
-        ⚡ Generate Next Match
-        ${isNextAdv?`<span class="badge badge-adv" style="margin-left:4px">${advPlayersAvail>=4?'⚔️ ADV':'skip'}</span>`:''}
+        ⚡ ${scheduledQueue.length>0?'Start Next Match':'Next Match'}
+        ${scheduledQueue.length>0?`<span class="badge badge-primary" style="margin-left:4px">${scheduledQueue.length} ready</span>`:''}
+        ${scheduledQueue.length===0&&isNextAdv?`<span class="badge badge-adv" style="margin-left:4px">${advPlayersAvail>=4?'⚔️ ADV':'skip'}</span>`:''}
       </button>
-      ${activeMatches.length===0?`<button class="btn btn-ghost btn-sm" onclick="generateAllMatchups('${s.id}')">Generate All Courts</button>`:''}
+      <button class="btn btn-primary btn-sm" onclick="generate10Matches('${s.id}')" ${canSchedule?'':'disabled'} title="${scheduledQueue.length>0?'Clear current schedule first to regenerate':''}">
+        📋 ${scheduledQueue.length>0?'Reschedule 10':'Schedule 10 Matches'}
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="openCustomMatchModal('${s.id}')">
+        ⚙️ Custom Match
+      </button>
     </div>`;
   }
 
@@ -1233,6 +1278,31 @@ function renderQueueBody(s){
     ${!queue.length?'<div class="empty" style="padding:16px"><div class="empty-text">No players in queue.</div></div>':''}
   </div>`;
 
+  // ---- Scheduled (Upcoming) Matches ----
+  const scheduledMatches = matches.filter(m=>!m.result && m.scheduled && !activeMatches.find(a=>a.id===m.id));
+  if(scheduledMatches.length){
+    html += `<div class="card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="card-title" style="margin:0">📋 Upcoming Schedule (${scheduledMatches.length})</div>
+        ${isAdmin?`<button class="btn btn-ghost btn-xs" onclick="clearSchedule('${s.id}')" style="font-size:10px;color:var(--red)">✕ Clear</button>`:''}
+      </div>
+      ${scheduledMatches.map((m,i)=>{
+        const t1n=(m.team1||[]).map(id=>{const p=STATE.members.find(x=>x.id===id);return p?.nickname||p?.name?.split(' ')[0]||'?';}).join(' & ');
+        const t2n=(m.team2||[]).map(id=>{const p=STATE.members.find(x=>x.id===id);return p?.nickname||p?.name?.split(' ')[0]||'?';}).join(' & ');
+        const isAdv=m.matchType==='advanced';
+        return `<div style="padding:7px 6px;border-bottom:1px solid var(--border);font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:${i===0?'var(--primary-dim)':''}; border-radius:${i===0?'6px':''};margin-bottom:${i===0?'4px':''}">
+          <span style="font-family:'Bebas Neue',sans-serif;color:${i===0?'var(--primary)':'var(--text3)'};font-size:14px;min-width:28px">#${m.matchNum}</span>
+          ${isAdv?'<span class="badge badge-adv" style="font-size:9px">⚔️</span>':''}
+          <span class="badge badge-ghost" style="font-size:9px">C${m.courtNum}</span>
+          <span style="font-weight:${i===0?'700':'400'}">${esc(t1n)}</span>
+          <span style="color:var(--gold);font-family:'Bebas Neue',sans-serif">VS</span>
+          <span style="font-weight:${i===0?'700':'400'}">${esc(t2n)}</span>
+          ${i===0?'<span class="badge badge-primary" style="margin-left:auto;font-size:9px">NEXT UP</span>':''}
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
   // ---- Match History ----
   if(completedMatches.length){
     html += `<div class="card">
@@ -1244,6 +1314,7 @@ function renderQueueBody(s){
         return `<div style="padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span style="font-family:'Bebas Neue',sans-serif;color:var(--text3);font-size:14px;width:20px">#${m.matchNum}</span>
           ${m.matchType==='advanced'?'<span class="badge badge-adv" style="font-size:9px">⚔️</span>':''}
+          ${m.custom?'<span class="badge badge-ghost" style="font-size:9px">custom</span>':''}
           <span style="${wA?'color:var(--green);font-weight:700':''}">${esc(t1n)}</span>
           <span style="color:var(--gold);font-family:'Bebas Neue',sans-serif">VS</span>
           <span style="${wB?'color:var(--green);font-weight:700':''}">${esc(t2n)}</span>
@@ -1336,11 +1407,29 @@ window.saveLatePlayers = async function(){
 window.generateMatchup = async function(sid){
   const s = STATE.sessions.find(x=>x.id===sid);
   if(!s) return;
-  const activeMatches = (s.matches||[]).filter(m=>!m.result);
-  const completedMatches = (s.matches||[]).filter(m=>m.result);
+  const allMatches = [...(s.matches||[])];
+  const activeMatches = allMatches.filter(m=>!m.result && !m.scheduled);
+  const completedMatches = allMatches.filter(m=>m.result);
+  const scheduledMatches = allMatches.filter(m=>!m.result && m.scheduled);
   const numCourts = parseInt(s.numCourts)||1;
   if(activeMatches.length >= numCourts){ toast('All courts occupied','error'); return; }
 
+  const nextCourtNum = (activeMatches.map(m=>m.courtNum||1).sort().pop()||0)+1;
+
+  // If there are pre-scheduled matches, activate the next one
+  if(scheduledMatches.length > 0){
+    const nextScheduled = scheduledMatches[0];
+    const updatedMatches = allMatches.map(m=>
+      m.id===nextScheduled.id ? {...m, scheduled:false, courtNum:nextCourtNum, activatedAt:new Date().toISOString()} : m
+    );
+    try{
+      await updateDoc(doc(db,'sessions',sid),{matches:updatedMatches});
+      toast(`Match #${nextScheduled.matchNum} started on Court ${nextCourtNum}!`,'success');
+    }catch(e){ toast(e.message,'error'); }
+    return;
+  }
+
+  // No schedule — generate a fresh match on the fly
   const onCourtIds = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
   const availableInQueue = (s.queueOrder||[]).filter(id=>!onCourtIds.includes(id));
   if(availableInQueue.length < 4){ toast('Need 4+ players in queue','error'); return; }
@@ -1348,8 +1437,6 @@ window.generateMatchup = async function(sid){
   const nextMatchNum = completedMatches.length + activeMatches.length + 1;
   const advInterval = parseInt(s.advInterval)||0;
   const isAdvSlot = advInterval>0 && nextMatchNum % advInterval === 0;
-
-  // Build used-pairings set to avoid repeats
   const usedPairings = buildUsedPairings(s.matches||[]);
 
   let team1, team2, matchType;
@@ -1370,8 +1457,7 @@ window.generateMatchup = async function(sid){
     team1=res.team1;team2=res.team2;matchType='regular';
   }
 
-  const nextCourtNum = (activeMatches.map(m=>m.courtNum||1).sort().pop()||0)+1;
-  const matches = [...(s.matches||[]),{
+  const matches = [...allMatches,{
     id:uid(),matchNum:nextMatchNum,matchType,courtNum:nextCourtNum,
     team1,team2,result:null,createdAt:new Date().toISOString()
   }];
@@ -1420,6 +1506,190 @@ window.generateAllMatchups = async function(sid){
   try{
     await updateDoc(doc(db,'sessions',sid),{matches:newMatches});
     toast(`${courtsUsed} court(s) filled!`,'success');
+  }catch(e){ toast(e.message,'error'); }
+};
+
+// ============ GENERATE 10 MATCHES SCHEDULE ============
+window.generate10Matches = async function(sid){
+  const s = STATE.sessions.find(x=>x.id===sid);
+  if(!s) return;
+
+  const activeMatches = (s.matches||[]).filter(m=>!m.result);
+  const completedMatches = (s.matches||[]).filter(m=>m.result);
+  const numCourts = parseInt(s.numCourts)||1;
+  const advInterval = parseInt(s.advInterval)||0;
+  const onCourtIds = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
+
+  // Start from current queue, excluding players already on court
+  let availableQueue = (s.queueOrder||[]).filter(id=>!onCourtIds.includes(id));
+  if(availableQueue.length < 4){ toast('Need at least 4 players in queue','error'); return; }
+
+  const usedPairings = buildUsedPairings(s.matches||[]);
+  let newMatches = [...(s.matches||[])];
+  let matchNum = completedMatches.length + activeMatches.length + 1;
+  let generated = 0;
+  const TARGET = 10;
+
+  // Simulate queue rotation: after a match is generated, those 4 go to back of queue
+  let rotatingQueue = [...availableQueue];
+
+  while(generated < TARGET && rotatingQueue.length >= 4){
+    const next4 = rotatingQueue.slice(0,4);
+    const isAdvSlot = advInterval>0 && matchNum % advInterval === 0;
+    let team1, team2, matchType;
+
+    if(isAdvSlot){
+      const advPlayers = (s.attendees||[]).filter(id=>{ const m=STATE.members.find(x=>x.id===id); return m?.skill==='Advanced'; });
+      if(advPlayers.length>=4){
+        const sh=[...advPlayers].sort(()=>Math.random()-0.5);
+        team1=[sh[0],sh[1]]; team2=[sh[2],sh[3]]; matchType='advanced';
+      } else {
+        const res=buildBalancedTeams(next4, usedPairings);
+        team1=res.team1; team2=res.team2; matchType='regular';
+      }
+    } else {
+      const res=buildBalancedTeams(next4, usedPairings);
+      team1=res.team1; team2=res.team2; matchType='regular';
+    }
+
+    // Assign court: cycle through available courts
+    const courtNum = (generated % numCourts) + 1;
+
+    newMatches.push({
+      id:uid(), matchNum, matchType, courtNum,
+      team1, team2, result:null,
+      scheduled:true, // mark as pre-scheduled (not yet active)
+      createdAt:new Date().toISOString()
+    });
+
+    // Rotate queue: played 4 go to end
+    const usedIds=[...team1,...team2];
+    rotatingQueue = [...rotatingQueue.filter(id=>!usedIds.includes(id)), ...usedIds];
+    usedIds.forEach(a=>usedIds.forEach(b=>{ if(a!==b) usedPairings.add([a,b].sort().join('|')); }));
+
+    matchNum++;
+    generated++;
+  }
+
+  try{
+    await updateDoc(doc(db,'sessions',sid),{matches:newMatches});
+    toast(`${generated} matches scheduled!`,'success');
+  }catch(e){ toast(e.message,'error'); }
+};
+
+// ============ CUSTOM MATCH ============
+window._cmSelectedPlayers = []; // ordered: [0,1] = Team A, [2,3] = Team B
+window._cmSessionId = null;
+
+window.openCustomMatchModal = function(sid){
+  const s = STATE.sessions.find(x=>x.id===sid);
+  if(!s) return;
+  window._cmSessionId = sid;
+  window._cmSelectedPlayers = [];
+  const att = s.attendees||[];
+  const activeOnCourt = (s.matches||[]).filter(m=>!m.result).flatMap(m=>(m.team1||[]).concat(m.team2||[]));
+
+  document.getElementById('cmPlayerChips').innerHTML = att.map(aid=>{
+    const m=STATE.members.find(x=>x.id===aid);
+    const nm=m?m.name:'?';
+    const onCourt=activeOnCourt.includes(aid);
+    return `<div class="chip ${onCourt?'disabled':''}" data-id="${aid}" onclick="cmTogglePlayer('${aid}')" style="${onCourt?'opacity:0.4;pointer-events:none':''}">
+      ${esc(m?.nickname||nm.split(' ')[0])} ${skillBadge(m?.skill||'Beginner')}
+      ${onCourt?'<span style="font-size:9px;color:var(--orange)">▪on court</span>':''}
+    </div>`;
+  }).join('');
+
+  document.getElementById('cmMatchType').value='regular';
+  cmRefreshTeams();
+  openModal('customMatchModal');
+};
+
+window.cmTogglePlayer = function(aid){
+  const idx = window._cmSelectedPlayers.indexOf(aid);
+  if(idx>=0){
+    window._cmSelectedPlayers.splice(idx,1);
+  } else {
+    if(window._cmSelectedPlayers.length>=4){ toast('Only 4 players per match','info'); return; }
+    window._cmSelectedPlayers.push(aid);
+  }
+  // Update chip highlight
+  document.querySelectorAll('#cmPlayerChips .chip').forEach(c=>{
+    const sel = window._cmSelectedPlayers.indexOf(c.dataset.id);
+    c.classList.toggle('on', sel>=0);
+    if(sel>=0){
+      const team = sel<2?'A':'B';
+      c.style.borderColor = team==='A'?'var(--primary)':'var(--gold)';
+      c.style.color = team==='A'?'var(--primary)':'var(--gold)';
+    } else {
+      c.style.borderColor=''; c.style.color='';
+    }
+  });
+  cmRefreshTeams();
+};
+
+window.cmRefreshTeams = function(){
+  const sel = window._cmSelectedPlayers;
+  const teamAIds = sel.slice(0,2);
+  const teamBIds = sel.slice(2,4);
+
+  const renderSlot = (aid, slot) => {
+    if(!aid) return `<div style="font-size:11px;color:var(--text3);padding:4px">Player ${slot}…</div>`;
+    const m=STATE.members.find(x=>x.id===aid);
+    const nm=m?m.name:'?';
+    return `<div style="display:flex;align-items:center;gap:6px;padding:3px 0">
+      <div class="m-avatar" style="width:22px;height:22px;font-size:9px;background:${avatarColor(nm)}22;color:${avatarColor(nm)}">${initials(nm)}</div>
+      <span style="font-size:12px;font-weight:600">${esc(m?.nickname||nm.split(' ')[0])}</span>
+      <button onclick="cmTogglePlayer('${aid}')" style="margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px">✕</button>
+    </div>`;
+  };
+
+  document.getElementById('cmTeamA').innerHTML = [0,1].map(i=>renderSlot(teamAIds[i], i+1)).join('');
+  document.getElementById('cmTeamB').innerHTML = [0,1].map(i=>renderSlot(teamBIds[i], i+1)).join('');
+  document.getElementById('cmSaveBtn').disabled = sel.length!==4;
+};
+
+window.saveCustomMatch = async function(){
+  const sid = window._cmSessionId;
+  const s = STATE.sessions.find(x=>x.id===sid);
+  if(!s) return;
+  const sel = window._cmSelectedPlayers;
+  if(sel.length!==4){ toast('Select exactly 4 players','error'); return; }
+
+  const team1 = sel.slice(0,2);
+  const team2 = sel.slice(2,4);
+  const matchType = document.getElementById('cmMatchType').value;
+  const activeMatches = (s.matches||[]).filter(m=>!m.result);
+  const completedMatches = (s.matches||[]).filter(m=>m.result);
+  const numCourts = parseInt(s.numCourts)||1;
+
+  if(activeMatches.length >= numCourts){ toast('All courts occupied','error'); return; }
+
+  const matchNum = completedMatches.length + activeMatches.length + 1;
+  const courtNum = (activeMatches.map(m=>m.courtNum||1).sort().pop()||0)+1;
+
+  const matches = [...(s.matches||[]),{
+    id:uid(), matchNum, matchType, courtNum,
+    team1, team2, result:null,
+    custom:true,
+    createdAt:new Date().toISOString()
+  }];
+
+  try{
+    await updateDoc(doc(db,'sessions',sid),{matches});
+    closeModal('customMatchModal');
+    toast('Custom match started!','success');
+  }catch(e){ toast(e.message,'error'); }
+};
+
+
+window.clearSchedule = async function(sid){
+  const s = STATE.sessions.find(x=>x.id===sid);
+  if(!s) return;
+  if(!confirm('Clear all upcoming scheduled matches?')) return;
+  const matches = (s.matches||[]).filter(m=>!m.scheduled);
+  try{
+    await updateDoc(doc(db,'sessions',sid),{matches});
+    toast('Schedule cleared','success');
   }catch(e){ toast(e.message,'error'); }
 };
 
