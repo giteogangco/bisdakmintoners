@@ -1182,9 +1182,15 @@ function renderQueueBody(s){
         <span class="badge badge-ghost" style="margin-left:4px">🏸 ${completedMatches.length} played</span>
         ${scheduledQueue.length>0?`<span class="badge badge-primary" style="margin-left:4px">📋 ${scheduledQueue.length} queued</span>`:''}
       </div>
-      ${isAdmin?`<div style="display:flex;gap:6px;flex-wrap:wrap">
+      ${isAdmin?`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-ghost btn-sm" onclick="openLatePlayerModal('${s.id}')">+ Late Player</button>
         <button class="btn btn-ghost btn-sm" onclick="shuffleQueue('${s.id}')">🔀</button>
+        <div style="display:flex;align-items:center;gap:4px;background:var(--surface2);border-radius:6px;padding:3px 8px">
+          <span style="font-size:10px;color:var(--text3)">🏟️</span>
+          <button onclick="changeCourts('${s.id}',${numCourts-1})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:14px;padding:0 2px;line-height:1" ${numCourts<=1?'disabled':''}">−</button>
+          <span style="font-size:12px;font-weight:700;min-width:14px;text-align:center">${numCourts}</span>
+          <button onclick="changeCourts('${s.id}',${numCourts+1})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:14px;padding:0 2px;line-height:1" ${numCourts>=6?'disabled':''}">+</button>
+        </div>
       </div>`:''}
     </div>
   </div>`;
@@ -1312,13 +1318,14 @@ function renderQueueBody(s){
         const t2n=(m.team2||[]).map(id=>{const p=STATE.members.find(x=>x.id===id);return p?.nickname||p?.name?.split(' ')[0]||'?';}).join(' & ');
         const wA=m.result==='teamA',wB=m.result==='teamB';
         return `<div style="padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span style="font-family:'Bebas Neue',sans-serif;color:var(--text3);font-size:14px;width:20px">#${m.matchNum}</span>
+          <span style="font-family:'Bebas Neue',sans-serif;color:var(--text3);font-size:14px;min-width:20px">#${m.matchNum}</span>
           ${m.matchType==='advanced'?'<span class="badge badge-adv" style="font-size:9px">⚔️</span>':''}
           ${m.custom?'<span class="badge badge-ghost" style="font-size:9px">custom</span>':''}
           <span style="${wA?'color:var(--green);font-weight:700':''}">${esc(t1n)}</span>
           <span style="color:var(--gold);font-family:'Bebas Neue',sans-serif">VS</span>
           <span style="${wB?'color:var(--green);font-weight:700':''}">${esc(t2n)}</span>
-          <span class="badge ${m.result==='draw'?'badge-ghost':'badge-green'}" style="margin-left:auto;font-size:9px">${m.result==='draw'?'Draw':wA?'A Wins':'B Wins'}</span>
+          <span class="badge ${m.result==='draw'?'badge-ghost':'badge-green'}" style="font-size:9px">${m.result==='draw'?'Draw':wA?'A Wins':'B Wins'}</span>
+          ${isAdmin?`<button onclick="deleteMatch('${s.id}','${m.id}')" style="margin-left:auto;background:none;border:1px solid var(--red);color:var(--red);border-radius:4px;padding:2px 6px;font-size:9px;cursor:pointer;line-height:1.4">🗑</button>`:''}
         </div>`;
       }).join('')}
     </div>`;
@@ -1755,6 +1762,57 @@ window.shuffleQueue = async function(sid){
   for(let i=arr.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[arr[i],arr[j]]=[arr[j],arr[i]];}
   try{ await updateDoc(doc(db,'sessions',sid),{queueOrder:arr}); toast('Shuffled!','success'); }
   catch(e){ toast(e.message,'error'); }
+};
+// ============ CHANGE COURTS (live) ============
+window.changeCourts = async function(sid, newCount){
+  if(newCount<1||newCount>6) return;
+  const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
+  try{
+    await updateDoc(doc(db,'sessions',sid),{numCourts:newCount});
+    toast(`Courts set to ${newCount}`,'success');
+  }catch(e){ toast(e.message,'error'); }
+};
+
+// ============ DELETE COMPLETED MATCH (with queue rollback) ============
+window.deleteMatch = async function(sid, matchId){
+  if(!confirm('Delete this match and roll back stats?')) return;
+  const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
+
+  const allMatches=[...(s.matches||[])];
+  const target=allMatches.find(m=>m.id===matchId);
+  if(!target||!target.result){ toast('Match not found or not completed','error'); return; }
+
+  // Remove the match
+  const newMatches=allMatches.filter(m=>m.id!==matchId);
+
+  // Rebuild queue by replaying all remaining completed matches from scratch
+  // Start: original attendees order
+  let queue=[...(s.attendees||[])];
+  const remainingCompleted=newMatches.filter(m=>m.result).sort((a,b)=>a.matchNum-b.matchNum);
+
+  remainingCompleted.forEach(m=>{
+    const on=(m.team1||[]).concat(m.team2||[]);
+    const off=queue.filter(id=>!on.includes(id));
+    let stayers,leavers;
+    if(m.result==='teamA'){stayers=m.team1;leavers=m.team2;}
+    else if(m.result==='teamB'){stayers=m.team2;leavers=m.team1;}
+    else{stayers=[];leavers=[...m.team1,...m.team2];}
+    queue=[...stayers,...off,...leavers];
+  });
+
+  // Re-number remaining matches sequentially to avoid gaps
+  let matchNum=1;
+  const renumbered=newMatches.map(m=>{
+    if(m.result||(!m.scheduled&&!m.result)){
+      return {...m, matchNum:matchNum++};
+    }
+    return {...m, matchNum:matchNum++};
+  });
+
+  try{
+    await updateDoc(doc(db,'sessions',sid),{matches:renumbered, queueOrder:queue});
+    toast('Match deleted & queue rolled back','success');
+  }catch(e){ toast(e.message,'error'); }
 };
 
 // ============ EXPENSES ============
