@@ -2091,14 +2091,15 @@ function renderChipinBody(s){
         ${expPayerRows.map(r=>{
           const payerPayRec=payments.find(p=>p.memberId===r.aid);
           const alreadyApplied=payerPayRec?parseFloat(payerPayRec.refundApplied)||0:0;
-          // Base refund = expPaid - perHead, adjusted for carry-over debt (if they owed from prev session)
-          const baseRefund=r.netRefund; // expPaid - perHead
-          const carryDebt=Math.max(0,r.carryover); // positive = they owe from prev session
-          const carryCredit=Math.max(0,-r.carryover); // negative carryover = credit
-          // Effective refund = netRefund - carry-over debt + carry-over credit - already offset
+          const baseRefund=r.netRefund; // expPaid - perHead (this session)
+          const carryDebt=Math.max(0,r.carryover); // what they still owe from previous sessions
+          const carryCredit=Math.max(0,-r.carryover);
+          // Net return after clearing their own carry-over debt
           const effectiveTotal=Math.max(0,baseRefund-carryDebt+carryCredit);
           const displayRefund=Math.max(0,effectiveTotal-alreadyApplied);
           const fullySettled=alreadyApplied>=effectiveTotal-0.005&&effectiveTotal>0;
+          // Carry-over that can be auto-settled from refund (not yet settled)
+          const autoSettleable=carryDebt>0.005&&baseRefund>carryDebt;
           return `
           <div class="chipin-row" style="border-color:${fullySettled?'rgba(0,232,153,0.3)':'rgba(0,212,255,0.3)'};background:${fullySettled?'rgba(0,232,153,0.04)':'rgba(0,212,255,0.04)'}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
@@ -2110,16 +2111,20 @@ function renderChipinBody(s){
                   · Share: <span style="color:var(--text2)">${fmtMoney(r.perHead)}</span>
                   · Base refund: <span style="color:var(--text2)">${fmtMoney(baseRefund)}</span>
                 </div>
-                ${carryDebt>0.005?`<div style="font-size:10px;color:var(--orange);margin-top:2px">⚠ Carry-over debt: −${fmtMoney(carryDebt)} → Net return: <strong style="color:var(--gold)">${fmtMoney(Math.max(0,baseRefund-carryDebt))}</strong></div>`:''}
-                ${carryCredit>0.005?`<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Carry-over credit: +${fmtMoney(carryCredit)} → Net return: <strong style="color:var(--green)">${fmtMoney(effectiveTotal)}</strong></div>`:''}
-                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Cash pending: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
+                ${carryDebt>0.005?`<div style="font-size:10px;color:var(--orange);margin-top:2px">
+                  ⚠ Prev. session debt: ${fmtMoney(carryDebt)}
+                  ${autoSettleable?` — <span style="color:var(--gold)">deducted from refund → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></span>`:' — exceeds refund'}
+                </div>`:''}
+                ${carryCredit>0.005?`<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Carry-over credit: +${fmtMoney(carryCredit)} → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></div>`:''}
+                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Remaining: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
               ${fullySettled
                 ?'<span class="badge badge-green">Settled</span>'
                 :`<span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(displayRefund)}</span>`}
-              ${canAdmin()&&!fullySettled?`<button class="btn btn-ghost btn-xs" onclick="openRefundOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${displayRefund})">⚙ Offset</button>`:''}
+              ${canAdmin()&&carryDebt>0.005&&!fullySettled?`<button class="btn btn-gold btn-xs" onclick="autoSettleCarryOver('${s.id}','${r.aid}','${esc(r.nm)}',${carryDebt})">✓ Settle Debt</button>`:''}
+              ${canAdmin()&&!fullySettled&&displayRefund>0.005?`<button class="btn btn-ghost btn-xs" onclick="openRefundOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${displayRefund})">⚙ Offset</button>`:''}
             </div>
           </div>`;
         }).join('')}
@@ -2362,6 +2367,82 @@ window.applyRefundOffset = async function(){
     await Promise.all(Object.entries(sessionUpdates).map(([ssid,pmts])=>updateDoc(doc(db,'sessions',ssid),{payments:pmts})));
     closeModal('payModal');
     toast(`Offset applied to ${offsetSummaryParts.length} player(s)! ${fmtMoney(totalApplied)} total.`,'success');
+    loadChipinSession();
+  }catch(e){ toast(e.message,'error'); }
+};
+
+// ============ AUTO-SETTLE CARRY-OVER DEBT FROM EXPENSE PAYER REFUND ============
+window.autoSettleCarryOver = async function(sid, payerId, payerName, carryDebt){
+  if(!confirm(`Deduct ${payerName}'s carry-over debt (${fmtMoney(carryDebt)}) from their refund and mark previous session(s) as paid?`)) return;
+
+  const curSession=STATE.sessions.find(x=>x.id===sid);if(!curSession)return;
+
+  // Find all previous sessions where this player still has an unpaid balance (oldest first)
+  const prevSessions=STATE.sessions
+    .filter(x=>x.id!==sid && new Date(x.date)<new Date(curSession.date))
+    .sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  const sessionUpdates={}; // ssid -> payments[]
+  const getPayments=(ssid)=>{
+    if(!sessionUpdates[ssid]){
+      const ss=STATE.sessions.find(x=>x.id===ssid);
+      sessionUpdates[ssid]=[...(ss?.payments||[])];
+    }
+    return sessionUpdates[ssid];
+  };
+
+  let remaining=carryDebt;
+  const settledSessions=[];
+
+  for(const ps of prevSessions){
+    if(remaining<=0.005) break;
+    const pAtt=ps.attendees||[];
+    if(!pAtt.includes(payerId)) continue;
+    const pExp=ps.expenses||[];
+    const pExpTotal=pExp.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
+    const pPH=parseFloat(ps.perHead)||(pAtt.length>0?pExpTotal/pAtt.length:0);
+    if(!pPH) continue;
+
+    const pExpPayer={};
+    pExp.forEach(e=>{ if(e.paidBy) pExpPayer[e.paidBy]=(pExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+    const pExpPaid=pExpPayer[payerId]||0;
+    const pNetRef=pExpPaid-pPH;
+    if(pNetRef>0) continue; // was an expense payer in that session — skip
+
+    const pOwed=Math.max(0,pPH-pExpPaid);
+    const pmts=getPayments(ps.id);
+    const pPayIdx=pmts.findIndex(p=>p.memberId===payerId);
+    const pPaid=pPayIdx>=0?parseFloat(pmts[pPayIdx].amountPaid)||0:0;
+    const pBal=pOwed-pPaid;
+    if(pBal<=0.005) continue;
+
+    const apply=Math.min(remaining, pBal);
+    const newPaid=pPaid+apply;
+    const newStatus=newPaid>=pOwed-0.005?'paid':newPaid>0?'partial':'unpaid';
+    const entry={memberId:payerId,amountPaid:newPaid,status:newStatus,
+      note:`Auto-settled from ${payerName} expense refund on ${fmtDate(curSession.date)}`,
+      updatedAt:new Date().toISOString()};
+    if(pPayIdx>=0)pmts[pPayIdx]=entry;else pmts.push(entry);
+    remaining-=apply;
+    settledSessions.push(`${fmtDate(ps.date)} (${fmtMoney(apply)})`);
+  }
+
+  if(!settledSessions.length){ toast('No previous debts found to settle','info'); return; }
+
+  // Update refundApplied on current session for the payer
+  const curPayments=getPayments(sid);
+  const curPayIdx=curPayments.findIndex(p=>p.memberId===payerId);
+  const prevApplied=curPayIdx>=0?parseFloat(curPayments[curPayIdx].refundApplied)||0:0;
+  const deducted=carryDebt-remaining; // how much was actually settled
+  const newRefundApplied=prevApplied+deducted;
+  const curEntry={memberId:payerId,amountPaid:0,status:'refund-offset',refundApplied:newRefundApplied,
+    note:`Carry-over debt settled: ${settledSessions.join(', ')}`,
+    updatedAt:new Date().toISOString()};
+  if(curPayIdx>=0)curPayments[curPayIdx]=curEntry;else curPayments.push(curEntry);
+
+  try{
+    await Promise.all(Object.entries(sessionUpdates).map(([ssid,pmts])=>updateDoc(doc(db,'sessions',ssid),{payments:pmts})));
+    toast(`Settled debt across ${settledSessions.length} session(s)!`,'success');
     loadChipinSession();
   }catch(e){ toast(e.message,'error'); }
 };
