@@ -2104,7 +2104,10 @@ function renderChipinBody(s){
         carry -= unrecoveredRefund; // credit — reduces what they owe in future sessions
       } else {
         // Normal player — carry over any unpaid balance
-        carry += prevOwed - ppaid;
+        // Clamp to zero: if they overpaid in a single session (e.g. via refund offset),
+        // that does NOT generate a credit for future sessions — it just clears the debt.
+        const sessionBal = prevOwed - ppaid;
+        carry += Math.max(0, sessionBal);
       }
     });
     return carry; // negative = credit, positive = debt
