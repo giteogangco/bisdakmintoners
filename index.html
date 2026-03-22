@@ -1037,8 +1037,9 @@ function renderOutstandingList(list){
 }
 
 window.showOutstandingBreakdown = function(memberId, memberName){
+  // ---- replicate gatherOutstanding delta logic exactly ----
   const sessionRows = [];
-  let runningNet = 0; // accumulated net balance across sessions (matches gatherOutstanding)
+  let sessionNetBal = 0; // matches sessionNetBal[memberId] in gatherOutstanding
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
@@ -1056,20 +1057,21 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const netRefund=expPaid-perHead;
     let delta;
     if(netRefund>0){
-      // Expense payer: unrecovered refund = credit (negative delta)
-      delta=-Math.max(0,netRefund-refundApplied);
+      delta=-Math.max(0,netRefund-refundApplied); // credit (negative)
     } else {
-      delta=Math.max(0,perHead-expPaid)-paid;
+      delta=Math.max(0,perHead-expPaid)-paid; // debt (positive)
     }
-    runningNet+=delta;
+    sessionNetBal+=delta;
     const owed=Math.max(0,perHead-expPaid);
-    const bal=owed-paid;
-    // Show this session if it has a positive per-session balance or contributes to the running total
     const sessionLabel=fmtDate(s.date)+(s.venue?' · '+esc(s.venue):'');
-    if(delta>0.005){
-      sessionRows.push({label:sessionLabel, owed, paid, bal:delta, perHead, expPaid, refundApplied, date:s.date, isCredit:false});
-    } else if(delta<-0.005){
-      sessionRows.push({label:sessionLabel, owed, paid, bal:delta, perHead, expPaid, refundApplied, date:s.date, isCredit:true});
+    // Show every session that has a non-zero delta (debt or credit)
+    if(Math.abs(delta)>0.005){
+      sessionRows.push({
+        label:sessionLabel, owed, paid, delta, perHead, expPaid,
+        refundApplied, date:s.date,
+        isCredit:delta<0,
+        netRefund
+      });
     }
   });
 
@@ -1083,6 +1085,10 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     if(bal>0.005) projectRows.push({name:esc(p.name||'Project'), due, paid, bal});
   });
 
+  const projectTotal=projectRows.reduce((s,r)=>s+r.bal,0);
+  // Total outstanding = same value gatherOutstanding uses to display on dashboard
+  const grandTotal=Math.max(0,sessionNetBal)+projectTotal;
+
   document.getElementById('detailBody').innerHTML=`
     <div class="modal-handle"></div>
     <div class="modal-header">
@@ -1093,20 +1099,27 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     ${sessionRows.length?`
       <div class="card-title" style="margin-bottom:8px">💸 Session Balances</div>
       ${sessionRows.map(r=>`
-        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius2);padding:9px 12px;margin-bottom:6px">
+        <div style="background:${r.isCredit?'rgba(0,232,153,0.06)':'var(--surface2)'};border:1px solid ${r.isCredit?'rgba(0,232,153,0.2)':'var(--border)'};border-radius:var(--radius2);padding:9px 12px;margin-bottom:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <span style="font-size:12px;font-weight:600">${r.label}</span>
-            <span style="font-family:'Barlow Condensed',sans-serif;color:${r.isCredit?'var(--green)':'var(--red)'};font-size:13px;font-weight:700">${r.isCredit?'−':''}${fmtMoney(Math.abs(r.bal))}</span>
+            <span style="font-family:'Barlow Condensed',sans-serif;color:${r.isCredit?'var(--green)':'var(--red)'};font-size:13px;font-weight:700">
+              ${r.isCredit?'−':'+'}${fmtMoney(Math.abs(r.delta))}
+            </span>
           </div>
           <div style="font-size:10px;color:var(--text3);display:flex;flex-wrap:wrap;gap:6px">
             <span>Per head: <span style="color:var(--gold)">${fmtMoney(r.perHead)}</span></span>
             ${r.expPaid>0?`<span>· Exp paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span></span>`:''}
             <span>· Owed: <span style="color:var(--text)">${fmtMoney(r.owed)}</span></span>
             <span>· Paid: <span style="color:var(--green)">${fmtMoney(r.paid)}</span></span>
-            ${r.isCredit?`<span style="color:var(--green)">· Credit applied</span>`:''}
+            ${r.isCredit?`<span style="color:var(--green)">✓ Unrecovered refund (offsets other debts)</span>`:''}
           </div>
         </div>
       `).join('')}
+      ${sessionNetBal<-0.005?`
+        <div style="background:rgba(0,232,153,0.08);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:7px 12px;margin-bottom:6px;font-size:11px;color:var(--green)">
+          ✓ Net session credit of ${fmtMoney(Math.abs(sessionNetBal))} — fully offsets all debts
+        </div>
+      `:''}
     `:''}
     ${projectRows.length?`
       <div class="card-title" style="margin-top:10px;margin-bottom:8px">📋 Project Balances</div>
@@ -1122,7 +1135,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     `:''}
     <div style="margin-top:14px;background:var(--red-dim);border:1px solid rgba(255,68,102,0.25);border-radius:var(--radius2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Total Outstanding</span>
-      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(Math.max(0,runningNet)+projectRows.reduce((s,r)=>s+r.bal,0))}</span>
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(grandTotal)}</span>
     </div>
   `;
   openModal('detailModal');
