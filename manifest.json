@@ -1,0 +1,17 @@
+{
+  "background_color": "#ffffff",
+  "dir": "auto",
+  "display": "standalone",
+  "name": "bisdakmintoners",
+  "orientation": "any",
+  "scope": "/",
+  "short_name": "bisdak",
+  "start_url": "https://bisdakmintoners.vercel.app/",
+  "theme_color": "#e95df1",
+  "id": "bisdak",
+  "lang": "en",
+  "categories": [
+    "fitness",
+    "utilities"
+  ]
+}
