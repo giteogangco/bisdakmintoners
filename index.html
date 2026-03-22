@@ -7,7 +7,6 @@
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <title>Bisdakmintoners</title>
-<link rel="manifest" href="/manifest.json"/>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:wght@300;400;500;600;700&family=Barlow+Condensed:wght@400;600;700&display=swap" rel="stylesheet"/>
 <style>
 :root{
@@ -1039,6 +1038,7 @@ function renderOutstandingList(list){
 
 window.showOutstandingBreakdown = function(memberId, memberName){
   const sessionRows = [];
+  let runningNet = 0; // accumulated net balance across sessions (matches gatherOutstanding)
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
@@ -1050,14 +1050,27 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const expPaid=expPayerTotals[memberId]||0;
-    const netRef=expPaid-perHead;
-    if(netRef>0) return;
     const pay=(s.payments||[]).find(p=>p.memberId===memberId);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+    const netRefund=expPaid-perHead;
+    let delta;
+    if(netRefund>0){
+      // Expense payer: unrecovered refund = credit (negative delta)
+      delta=-Math.max(0,netRefund-refundApplied);
+    } else {
+      delta=Math.max(0,perHead-expPaid)-paid;
+    }
+    runningNet+=delta;
     const owed=Math.max(0,perHead-expPaid);
     const bal=owed-paid;
-    if(bal>0.005) sessionRows.push({label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''), owed, paid, bal, perHead, expPaid, refundApplied, date:s.date});
+    // Show this session if it has a positive per-session balance or contributes to the running total
+    const sessionLabel=fmtDate(s.date)+(s.venue?' · '+esc(s.venue):'');
+    if(delta>0.005){
+      sessionRows.push({label:sessionLabel, owed, paid, bal:delta, perHead, expPaid, refundApplied, date:s.date, isCredit:false});
+    } else if(delta<-0.005){
+      sessionRows.push({label:sessionLabel, owed, paid, bal:delta, perHead, expPaid, refundApplied, date:s.date, isCredit:true});
+    }
   });
 
   const projectRows = [];
@@ -1083,13 +1096,14 @@ window.showOutstandingBreakdown = function(memberId, memberName){
         <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius2);padding:9px 12px;margin-bottom:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <span style="font-size:12px;font-weight:600">${r.label}</span>
-            <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:13px;font-weight:700">${fmtMoney(r.bal)}</span>
+            <span style="font-family:'Barlow Condensed',sans-serif;color:${r.isCredit?'var(--green)':'var(--red)'};font-size:13px;font-weight:700">${r.isCredit?'−':''}${fmtMoney(Math.abs(r.bal))}</span>
           </div>
           <div style="font-size:10px;color:var(--text3);display:flex;flex-wrap:wrap;gap:6px">
             <span>Per head: <span style="color:var(--gold)">${fmtMoney(r.perHead)}</span></span>
             ${r.expPaid>0?`<span>· Exp paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span></span>`:''}
             <span>· Owed: <span style="color:var(--text)">${fmtMoney(r.owed)}</span></span>
             <span>· Paid: <span style="color:var(--green)">${fmtMoney(r.paid)}</span></span>
+            ${r.isCredit?`<span style="color:var(--green)">· Credit applied</span>`:''}
           </div>
         </div>
       `).join('')}
@@ -1108,7 +1122,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     `:''}
     <div style="margin-top:14px;background:var(--red-dim);border:1px solid rgba(255,68,102,0.25);border-radius:var(--radius2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Total Outstanding</span>
-      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(sessionRows.reduce((s,r)=>s+r.bal,0)+projectRows.reduce((s,r)=>s+r.bal,0))}</span>
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(Math.max(0,runningNet)+projectRows.reduce((s,r)=>s+r.bal,0))}</span>
     </div>
   `;
   openModal('detailModal');
