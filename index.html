@@ -2188,9 +2188,9 @@ function renderChipinBody(s){
           ${totalExpenses>0?`<div class="stat-sub">From ${fmtMoney(totalExpenses)} expenses</div>`:''}
         </div>
         <div class="stat-card"><div class="stat-label">Collected</div><div class="stat-val" style="font-size:20px;color:var(--green)">${fmtMoney(totalCollected)}</div></div>
-        <div class="stat-card"><div class="stat-label">Remaining</div><div class="stat-val" style="font-size:20px;color:var(--red)">${fmtMoney(Math.max(0,att.reduce((sum,aid)=>{const ep=expensePayerTotals[aid]||0;const effOwed=Math.max(0,perHead-ep);const cp=payments.find(p=>p.memberId===aid);return sum+Math.max(0,effOwed-(cp?parseFloat(cp.amountPaid)||0:0));},0)))}</div></div>
+        <div class="stat-card"><div class="stat-label">Remaining</div><div class="stat-val" style="font-size:20px;color:var(--red)">${fmtMoney(Math.max(0,perHead*att.length-totalCollected))}</div></div>
       </div>
-      ${perHead>0?`<div class="progress" style="margin-bottom:14px"><div class="progress-fill" style="width:${(()=>{const total=perHead*att.length;if(!total)return 0;const covered=att.reduce((sum,aid)=>{const ep=expensePayerTotals[aid]||0;const contrib=Math.min(ep,perHead);const cp=payments.find(p=>p.memberId===aid);return sum+contrib+(cp?parseFloat(cp.amountPaid)||0:0);},0);return Math.min(100,covered/total*100);})()}%;background:var(--green)"></div></div>`:''}
+      ${perHead>0?`<div class="progress" style="margin-bottom:14px"><div class="progress-fill" style="width:${Math.min(100,perHead*att.length>0?totalCollected/(perHead*att.length)*100:0)}%;background:var(--green)"></div></div>`:''}
       ${!perHead?`<div class="alert alert-warn">No per-head amount yet. Log expenses to auto-calculate, or <button class="btn btn-ghost btn-xs" onclick="manualSetPerHead('${s.id}')">set manually</button>.</div>`:''}
 
       ${expPayerRows.length?`
@@ -2205,14 +2205,8 @@ function renderChipinBody(s){
           const carryCredit=Math.max(0,-r.carryover);
           // Net return after clearing their own carry-over debt
           const effectiveTotal=Math.max(0,baseRefund-carryDebt+carryCredit);
-          // Cash already paid by other players (non-expense-payers) reduces Gerry's remaining refund
-          // because that cash is now in the pool available to be handed back to Gerry
-          const cashPaidByOthers=normalRows.reduce((sum,nr)=>{
-            const nrPay=payments.find(p=>p.memberId===nr.aid);
-            return sum+(nrPay?parseFloat(nrPay.amountPaid)||0:0);
-          },0);
-          const displayRefund=Math.max(0,effectiveTotal-alreadyApplied-cashPaidByOthers);
-          const fullySettled=(alreadyApplied+cashPaidByOthers)>=effectiveTotal-0.005&&effectiveTotal>0;
+          const displayRefund=Math.max(0,effectiveTotal-alreadyApplied);
+          const fullySettled=alreadyApplied>=effectiveTotal-0.005&&effectiveTotal>0;
           // Carry-over that can be auto-settled from refund (not yet settled)
           const autoSettleable=carryDebt>0.005&&baseRefund>carryDebt;
           return `
@@ -2231,7 +2225,7 @@ function renderChipinBody(s){
                   ${autoSettleable?` — <span style="color:var(--gold)">deducted from refund → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></span>`:' — exceeds refund'}
                 </div>`:''}
                 ${carryCredit>0.005?`<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Carry-over credit: +${fmtMoney(carryCredit)} → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></div>`:''}
-                ${(alreadyApplied>0||cashPaidByOthers>0.005)?`<div style="font-size:10px;color:var(--text3);margin-top:2px">${alreadyApplied>0?'Offset applied: '+fmtMoney(alreadyApplied):''}${alreadyApplied>0&&cashPaidByOthers>0.005?' · ':''}${cashPaidByOthers>0.005?'Players paid: '+fmtMoney(cashPaidByOthers):''}${displayRefund>0.005?' · Still to return: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''} 
+                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Remaining: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
@@ -3061,18 +3055,8 @@ function renderHistoryCard(s){
         ${STATE.members.filter(m=>att.includes(m.id)).map(m=>{
           const pay=payments.find(p=>p.memberId===m.id);
           const paid=pay?parseFloat(pay.amountPaid)||0:0;
-          // Account for expenses this member paid on behalf of the group
-          const expPayerTotalsQ={};
-          (s.expenses||[]).forEach(e=>{ if(e.paidBy) expPayerTotalsQ[e.paidBy]=(expPayerTotalsQ[e.paidBy]||0)+(parseFloat(e.amount)||0); });
-          const expPaidQ=expPayerTotalsQ[m.id]||0;
-          // What they actually owe in cash = perHead minus expenses they already covered (floor 0)
-          const effectiveOwedQ=perHead?Math.max(0,perHead-expPaidQ):0;
-          const bal=effectiveOwedQ-paid;
-          const status=!perHead?'':
-            expPaidQ>=perHead?'<span class="badge badge-green">Paid</span>': // expense covers full share
-            paid>=effectiveOwedQ&&effectiveOwedQ>0?'<span class="badge badge-green">Paid</span>':
-            effectiveOwedQ<=0.005?'<span class="badge badge-green">Paid</span>':
-            paid>0?'<span class="badge badge-gold">Part</span>':'<span class="badge badge-red">Unpaid</span>';
+          const bal=perHead?perHead-paid:0;
+          const status=!perHead?'':paid>=perHead?'<span class="badge badge-green">Paid</span>':paid>0?'<span class="badge badge-gold">Part</span>':'<span class="badge badge-red">Unpaid</span>';
           const wins=matches.filter(mx=>((mx.result==='teamA'?mx.team1:mx.result==='teamB'?mx.team2:[])||[]).includes(m.id)).length;
           const losses=matches.filter(mx=>((mx.result==='teamA'?mx.team2:mx.result==='teamB'?mx.team1:[])||[]).includes(m.id)).length;
           const matchesPlayed=matches.filter(mx=>(mx.team1||[]).concat(mx.team2||[]).includes(m.id)).length;
