@@ -563,6 +563,10 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
         <option value="advanced">⚔️ Advanced Battle</option>
       </select>
     </div>
+    <div class="form-group">
+      <label class="form-label">Split Among</label>
+      <div id="efPlayers" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('customMatchModal')">Cancel</button>
       <button class="btn btn-primary" id="cmSaveBtn" onclick="saveCustomMatch()" disabled>Start Match</button>
@@ -1986,7 +1990,7 @@ function renderExpenseBody(s){
             <div style="min-width:0">
               <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(e.description||e.category)}</div>
               <div style="font-size:10px;color:var(--text3)">Paid by: ${paidBy?esc(paidBy.nickname||paidBy.name.split(' ')[0]):'—'} · ${e.date||''}</div>
-            </div>
+              ${e.includedPlayers&&e.includedPlayers.length>0?`<div style="font-size:10px;color:var(--text3)">Split: ${e.includedPlayers.map(function(id){const m=STATE.members.find(function(x){return x.id===id;});return m?esc(m.nickname||m.name.split(' ')[0]):'?';}).join(', ')}</div>`:''}            </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
             <span style="font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;color:var(--red)">${fmtMoney(e.amount)}</span>
@@ -2008,6 +2012,15 @@ window.openExpenseModal = function(sid){
   const sel=document.getElementById('efPaidBy');
   sel.innerHTML='<option value="">— select member —</option>'+
     STATE.members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('');
+  // Populate Split Among checkboxes with session attendees
+  const _expSess=STATE.sessions.find(x=>x.id===sid);
+  const _expAttendees=(_expSess&&_expSess.attendees)||[];
+  const _playersEl=document.getElementById('efPlayers');
+  _playersEl.innerHTML=_expAttendees.map(function(mid){
+    const m=STATE.members.find(function(x){return x.id===mid;});
+    if(!m)return '';
+    return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;background:var(--surface2);padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" class="ef-player-cb" value="'+mid+'" checked style="cursor:pointer;"> '+esc(m.nickname||m.name.split(' ')[0])+'</label>';
+  }).join('');
   openModal('expenseModal');
 };
 
@@ -2022,13 +2035,15 @@ window.saveExpense = async function(){
     amount,
     description:document.getElementById('efDesc').value.trim(),
     paidBy:document.getElementById('efPaidBy').value||null,
-    date:new Date().toISOString().split('T')[0]
+    date:new Date().toISOString().split('T')[0],
+    includedPlayers:Array.from(document.querySelectorAll('.ef-player-cb:checked')).map(function(cb){return cb.value;})
   };
   const expenses=[...(s.expenses||[]),expense];
   // Auto-calc perHead from total expenses
   const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
   const att=s.attendees||[];
-  const perHead=att.length>0?Math.ceil((total/att.length)*100)/100:0;
+  const splitCount=expense.includedPlayers&&expense.includedPlayers.length>0?expense.includedPlayers.length:att.length;
+  const perHead=splitCount>0?Math.ceil((total/splitCount)*100)/100:0;
   try{
     await updateDoc(doc(db,'sessions',sid),{expenses,perHead});
     closeModal('expenseModal');
