@@ -563,10 +563,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
         <option value="advanced">⚔️ Advanced Battle</option>
       </select>
     </div>
-    <div class="form-group">
-      <label class="form-label">Split Among</label>
-      <div id="efPlayers" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
-    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('customMatchModal')">Cancel</button>
       <button class="btn btn-primary" id="cmSaveBtn" onclick="saveCustomMatch()" disabled>Start Match</button>
@@ -603,6 +599,10 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
       <select class="form-select" id="efPaidBy">
         <option value="">— select member —</option>
       </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Split Among</label>
+      <div id="efPlayers" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('expenseModal')">Cancel</button>
