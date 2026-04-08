@@ -968,23 +968,28 @@ function gatherOutstanding(){
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
     const expenses=s.expenses||[];
-    const totalExp=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const perHead=parseFloat(s.perHead)||(att.length>0?totalExp/att.length:0);
-    if(!perHead) return;
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     att.forEach(aid=>{
+      const myShare=expenses.reduce((sum,e)=>{
+        const amt=parseFloat(e.amount)||0;
+        if(!amt) return sum;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+        if(!incl.includes(aid)) return sum;
+        return sum+Math.ceil((amt/incl.length)*100)/100;
+      },0)||parseFloat(s.perHead)||0;
+      if(!myShare&&!expPayerTotals[aid]) return;
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
       const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
-      const netRefund=expPaid-perHead;
+      const netRefund=expPaid-myShare;
       let delta;
       if(netRefund>0){
         // Expense payer: unrecovered refund = credit for them
         delta=-Math.max(0,netRefund-refundApplied);
       } else {
-        delta=Math.max(0,perHead-expPaid)-paid;
+        delta=Math.max(0,myShare-expPaid)-paid;
       }
       sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
     });
@@ -1049,29 +1054,33 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const att=s.attendees||[];
     if(!att.includes(memberId)) return;
     const expenses=s.expenses||[];
-    const totalExp=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const perHead=parseFloat(s.perHead)||(att.length>0?totalExp/att.length:0);
-    if(!perHead) return;
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const expPaid=expPayerTotals[memberId]||0;
+    const myShare=expenses.reduce((sum,e)=>{
+      const amt=parseFloat(e.amount)||0;
+      if(!amt) return sum;
+      const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+      if(!incl.includes(memberId)) return sum;
+      return sum+Math.ceil((amt/incl.length)*100)/100;
+    },0)||parseFloat(s.perHead)||0;
     const pay=(s.payments||[]).find(p=>p.memberId===memberId);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
-    const netRefund=expPaid-perHead;
+    const netRefund=expPaid-myShare;
     let delta;
     if(netRefund>0){
       delta=-Math.max(0,netRefund-refundApplied); // credit (negative)
     } else {
-      delta=Math.max(0,perHead-expPaid)-paid; // debt (positive)
+      delta=Math.max(0,myShare-expPaid)-paid; // debt (positive)
     }
     sessionNetBal+=delta;
-    const owed=Math.max(0,perHead-expPaid);
+    const owed=Math.max(0,myShare-expPaid);
     const sessionLabel=fmtDate(s.date)+(s.venue?' · '+esc(s.venue):'');
     // Show every session that has a non-zero delta (debt or credit)
     if(Math.abs(delta)>0.005){
       sessionRows.push({
-        label:sessionLabel, owed, paid, delta, perHead, expPaid,
+        label:sessionLabel, owed, paid, delta, perHead:myShare, expPaid,
         refundApplied, date:s.date,
         isCredit:delta<0,
         netRefund
