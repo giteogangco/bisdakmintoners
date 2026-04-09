@@ -251,6 +251,7 @@ tr:last-child td{border-bottom:none}
   padding:0;opacity:0;pointer-events:none;transition:opacity 0.2s;
 }
 .modal-overlay.open{opacity:1;pointer-events:all}
+.modal-overlay.elevated{z-index:600;}
 .modal{
   background:var(--surface);border:1px solid var(--border2);border-radius:20px 20px 0 0;
   padding:20px 18px 28px;width:100%;max-width:600px;
@@ -1009,12 +1010,11 @@ function gatherOutstanding(){
         // Normal player: owed - paid (negative = overpayment credit)
         const rawDelta=Math.max(0,myShare-expPaid)-paid;
         const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
-        // Reduce credit by cash overpay already offset (refundApplied) AND carry-over credit already offset (creditOffsetApplied)
         const netCredit=Math.max(0,overpayCredit-refundApplied);
         delta=rawDelta<0?-netCredit:rawDelta;
-        // Also subtract carry-over credit offset applied in this session
-        if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
       }
+      // creditOffsetApplied reduces credit regardless of payer type — apply unconditionally
+      if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
       sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
     });
   });
@@ -1098,6 +1098,8 @@ window.showOutstandingBreakdown = function(memberId, memberName){
   const sessionRows = [];
   let sessionNetBal = 0; // matches sessionNetBal[memberId] in gatherOutstanding
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  // Find the MOST RECENT session this member attended (used for Offset button sid)
+  let latestSid = null;
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
     if(!att.includes(memberId)) return;
@@ -1119,6 +1121,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const pay=(s.payments||[]).find(p=>p.memberId===memberId);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+    const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
     const netRefund=expPaid-myShare;
     let delta;
     if(netRefund>0){
@@ -1130,14 +1133,16 @@ window.showOutstandingBreakdown = function(memberId, memberName){
       const netCredit=Math.max(0,overpayCredit-refundApplied);
       delta=rawDelta<0?-netCredit:rawDelta;
     }
+    // creditOffsetApplied reduces credit regardless of payer type — apply unconditionally
+    if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
     sessionNetBal+=delta;
     const owed=Math.max(0,myShare-expPaid);
     const sessionLabel=fmtDate(s.date)+(s.venue?' · '+esc(s.venue):'');
-    // Show every session that has a non-zero delta (debt or credit)
+    latestSid=s.id; // track most recent session (sessions sorted oldest-first)
     if(Math.abs(delta)>0.005){
       sessionRows.push({
         label:sessionLabel, owed, paid, delta, perHead:myShare, expPaid,
-        refundApplied, date:s.date,
+        refundApplied, creditOffsetApplied, date:s.date,
         isCredit:delta<0,
         netRefund
       });
@@ -1155,8 +1160,10 @@ window.showOutstandingBreakdown = function(memberId, memberName){
   });
 
   const projectTotal=projectRows.reduce((s,r)=>s+r.bal,0);
-  // Total outstanding = same value gatherOutstanding uses to display on dashboard
   const grandTotal=Math.max(0,sessionNetBal)+projectTotal;
+  // Net credit = absolute value of negative sessionNetBal minus any project debt
+  const netCredit=sessionNetBal<-0.005?Math.max(0,Math.abs(sessionNetBal)-projectTotal):0;
+  const isCreditor=netCredit>0.05;
 
   document.getElementById('detailBody').innerHTML=`
     <div class="modal-handle"></div>
@@ -1164,7 +1171,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
       <div class="modal-title">📊 ${esc(memberName)}</div>
       <button class="modal-close" onclick="closeModal('detailModal')">✕</button>
     </div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">Outstanding balance breakdown</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">${isCreditor?'Excess credit breakdown':'Outstanding balance breakdown'}</div>
     ${sessionRows.length?`
       <div class="card-title" style="margin-bottom:8px">💸 Session Balances</div>
       ${sessionRows.map(r=>`
@@ -1180,6 +1187,8 @@ window.showOutstandingBreakdown = function(memberId, memberName){
             ${r.expPaid>0?`<span>· Exp paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span></span>`:''}
             <span>· Owed: <span style="color:var(--text)">${fmtMoney(r.owed)}</span></span>
             <span>· Paid: <span style="color:var(--green)">${fmtMoney(r.paid)}</span></span>
+            ${r.refundApplied>0.005?`<span>· Refund offset: <span style="color:var(--text2)">${fmtMoney(r.refundApplied)}</span></span>`:''}
+            ${r.creditOffsetApplied>0.005?`<span>· Credit offset used: <span style="color:var(--text2)">${fmtMoney(r.creditOffsetApplied)}</span></span>`:''}
             ${r.isCredit?`<span style="color:var(--green)">✓ Unrecovered refund (offsets other debts)</span>`:''}
           </div>
         </div>
@@ -1207,9 +1216,16 @@ window.showOutstandingBreakdown = function(memberId, memberName){
       <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Total Outstanding</span>
       <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(grandTotal)}</span>
     </div>`:`
-    <div style="margin-top:14px;background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
-      <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Net Excess Credit</span>
-      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--green)">↩ ${fmtMoney(Math.max(0,sessionNetBal<0?Math.abs(sessionNetBal)-projectTotal:0))}</span>
+    <div style="margin-top:14px;background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:10px 14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center${isCreditor?';margin-bottom:10px':''}">
+        <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Net Excess Credit</span>
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--green)">↩ ${fmtMoney(netCredit)}</span>
+      </div>
+      ${isCreditor&&canAdmin()&&latestSid?`
+        <button class="btn btn-primary btn-block" style="margin-top:2px"
+          onclick="closeModal('detailModal');openOverpayOffsetModal('${latestSid}','${memberId}','${esc(memberName)}',${netCredit},true)">
+          ⚙ Offset This Credit →
+        </button>`:''}
     </div>`}
   `;
   openModal('detailModal');
@@ -2291,6 +2307,8 @@ function renderChipinBody(s){
 
       // How much of their refund was already offset to others (if they were an expense payer)
       const prevRefundApplied=ppay?parseFloat(ppay.refundApplied)||0:0;
+      // How much carry-over credit was already offset to others (e.g. via project offset)
+      const prevCreditOffsetApplied=ppay?parseFloat(ppay.creditOffsetApplied)||0:0;
 
       // If they were an expense payer: their net position = -(netRefund - refundApplied)
       // i.e. if they have an unrecovered refund, that's a credit (negative carry-over)
@@ -2313,6 +2331,8 @@ function renderChipinBody(s){
           carry += Math.max(0, sessionBal);
         }
       }
+      // creditOffsetApplied reduces carry-over credit regardless of payer type
+      if(prevCreditOffsetApplied>0.005) carry+=prevCreditOffsetApplied;
     });
     return carry; // negative = credit, positive = debt
   }
@@ -2852,12 +2872,18 @@ window.applyRefundOffset = async function(){
 
       const pmts=getSessionPayments(debtSid);
       const idx=pmts.findIndex(p=>p.memberId===targetId);
+      const existing=idx>=0?pmts[idx]:{};
       const curPaid=idx>=0?parseFloat(pmts[idx].amountPaid)||0:0;
       const apply=Math.min(offsetAmt, debtInfo?debtInfo.bal:offsetAmt); // cap at actual balance
       const newPaid=curPaid+apply;
       const newStatus=newPaid>=owed-0.005?'paid':newPaid>0?'partial':'unpaid';
-      const entry={memberId:targetId,amountPaid:newPaid,status:newStatus,
+      // Accumulate offsetSources so each offset can be individually reversed
+      const prevSources=(existing.offsetSources||[]).filter(os=>os.payerSid!==sid||os.payerId!==payerId);
+      const existingSource=existing.offsetSources?.find(os=>os.payerSid===sid&&os.payerId===payerId);
+      const newSource={payerId, payerSid:sid, amount:(existingSource?.amount||0)+apply};
+      const entry={...existing, memberId:targetId, amountPaid:newPaid, status:newStatus,
         note:'Offset from '+payerName+' refund ('+fmtMoney(apply)+')',
+        offsetSources:[...prevSources, newSource],
         updatedAt:new Date().toISOString()};
       if(idx>=0)pmts[idx]=entry;else pmts.push(entry);
       playerApplied+=apply;
@@ -2881,7 +2907,11 @@ window.applyRefundOffset = async function(){
     const due=parseFloat(members[idx].fixedAmount||proj.fixedAmount)||0;
     const curPaid=parseFloat(members[idx].amountPaid)||0;
     const apply=Math.min(offsetAmt, Math.max(0,due-curPaid));
-    members[idx]={...members[idx], amountPaid:curPaid+apply, fixedAmount:due, updatedAt:new Date().toISOString()};
+    const prevProjSources=(members[idx].offsetSources||[]).filter(os=>os.payerSid!==sid||os.payerId!==payerId);
+    const existingProjSrc=members[idx].offsetSources?.find(os=>os.payerSid===sid&&os.payerId===payerId);
+    members[idx]={...members[idx], amountPaid:curPaid+apply, fixedAmount:due,
+      offsetSources:[...prevProjSources,{payerId, payerSid:sid, amount:(existingProjSrc?.amount||0)+apply}],
+      updatedAt:new Date().toISOString()};
     const mname=(STATE.members.find(x=>x.id===pmid)||{}).name||'?';
     totalApplied+=apply;
     // Note: project offsets also consume payer's credit — include in sessionApplied for tracking
@@ -3007,8 +3037,12 @@ window.autoSettleCarryOver = async function(sid, payerId, payerName, carryDebt){
     const apply=Math.min(remaining, pBal);
     const newPaid=pPaid+apply;
     const newStatus=newPaid>=pOwed-0.005?'paid':newPaid>0?'partial':'unpaid';
-    const entry={memberId:payerId,amountPaid:newPaid,status:newStatus,
+    const existingPay=pPayIdx>=0?pmts[pPayIdx]:{};
+    const prevSources=(existingPay.offsetSources||[]).filter(os=>os.payerSid!==sid||os.payerId!==payerId);
+    const existingSrc=existingPay.offsetSources?.find(os=>os.payerSid===sid&&os.payerId===payerId);
+    const entry={...existingPay, memberId:payerId, amountPaid:newPaid, status:newStatus,
       note:`Auto-settled from ${payerName} expense refund on ${fmtDate(curSession.date)}`,
+      offsetSources:[...prevSources,{payerId, payerSid:sid, amount:(existingSrc?.amount||0)+apply}],
       updatedAt:new Date().toISOString()};
     if(pPayIdx>=0)pmts[pPayIdx]=entry;else pmts.push(entry);
     remaining-=apply;
@@ -3078,6 +3112,7 @@ function _buildPayDebts(mid){
     const sPay=(s.payments||[]).find(p=>p.memberId===mid);
     const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
     const sRefundApplied=sPay?parseFloat(sPay.refundApplied)||0:0;
+    const sCreditOffsetApplied=sPay?parseFloat(sPay.creditOffsetApplied)||0:0;
 
     const netRefund=sExpPaid-sMyShare;
 
@@ -3085,15 +3120,16 @@ function _buildPayDebts(mid){
       // Expense payer in this session — update rolling carry with their unrecovered refund
       const unrecovered=Math.max(0,netRefund-sRefundApplied);
       rollingCarry-=unrecovered; // credit (reduces future debts)
-      return; // expense payers don't owe cash
+      // Apply creditOffsetApplied unconditionally — reduces carry credit regardless of payer type
+      if(sCreditOffsetApplied>0.005) rollingCarry+=sCreditOffsetApplied;
+      return; // expense payers don't owe cash themselves
     }
 
     // Normal player: rawOwed = share + carry (positive=debt, negative=credit from prev)
-    if(!sMyShare)return;
+    if(!sMyShare) return;
     const sOwed=Math.max(0,sMyShare-sExpPaid);
     const rawOwed=sOwed+rollingCarry; // rollingCarry negative = credit reduces this
     const effectiveOwed=Math.max(0,rawOwed);
-    const leftoverCredit=rawOwed<0?Math.abs(rawOwed):0;
 
     // Cash still needed = effectiveOwed - what they already paid
     const sBal=effectiveOwed-sPaid;
@@ -3112,9 +3148,7 @@ function _buildPayDebts(mid){
       rollingCarry=rawOwed-settledThisSession; // remaining after payment
     } else {
       // Fully settled (by cash or credit) — update rolling carry
-      // If credit covered it, remaining credit carries forward
       // Subtract any credit already offset to others via creditOffsetApplied
-      const sCreditOffsetApplied=sPay?parseFloat(sPay.creditOffsetApplied)||0:0;
       rollingCarry=rawOwed-sPaid+sCreditOffsetApplied; // reduce credit by what was already offset
     }
   });
@@ -3232,6 +3266,13 @@ window.openEditPayModal = function(sid,mid,mname,currentPaid,totalOwed){
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const pay=(s.payments||[]).find(p=>p.memberId===mid);
   const existingNote=pay?.note||'';
+  const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+  const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
+  const hasOffsets=refundApplied>0.005||creditOffsetApplied>0.005;
+  // Check if this player's payment was used to offset others (i.e. they are a beneficiary)
+  const offsetSources=pay?.offsetSources||[];
+  const isBeneficiary=offsetSources.length>0;
+
   document.getElementById('payModalBody').innerHTML=`
     <div class="modal-header" style="margin-bottom:12px">
       <div class="modal-title">✏️ Edit Payment</div>
@@ -3242,6 +3283,8 @@ window.openEditPayModal = function(sid,mid,mname,currentPaid,totalOwed){
       <div style="font-size:12px;color:var(--text3);margin-top:2px">Session: <strong>${fmtDate(s.date)}</strong>${s.venue?' · '+esc(s.venue):''}</div>
       <div style="font-size:12px;color:var(--text3);margin-top:2px">Amount owed: <span style="color:var(--gold)">${fmtMoney(totalOwed)}</span></div>
     </div>
+    ${hasOffsets?`<div class="alert alert-warn" style="font-size:11px;margin-bottom:10px">⚠ This payment has active offsets applied (${fmtMoney(refundApplied+creditOffsetApplied)}). Clearing will revert all offsets made from this payment.</div>`:''}
+    ${isBeneficiary?`<div style="background:rgba(0,212,255,0.07);border:1px solid rgba(0,212,255,0.25);border-radius:var(--radius2);padding:8px 12px;font-size:11px;color:var(--primary);margin-bottom:10px">↩ This payment was partially covered by an offset (${fmtMoney(offsetSources.reduce((s,o)=>s+o.amount,0))}). Clearing will revert that offset on the source player.</div>`:''}
     <div class="alert alert-warn" style="font-size:11px;margin-bottom:12px">⚠ This edits the recorded payment for <strong>this session only</strong>. Use "Pay" to record a new payment.</div>
     <div class="form-group"><label class="form-label">Corrected Amount Paid (AED)</label>
       <input type="number" class="form-input" id="editPamt" value="${currentPaid.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
@@ -3250,7 +3293,8 @@ window.openEditPayModal = function(sid,mid,mname,currentPaid,totalOwed){
       <input class="form-input" id="editPnote" value="${esc(existingNote)}" placeholder="e.g. Correction, Cash" autocomplete="off"/>
     </div>
     <div class="modal-footer" style="margin-top:0;padding-bottom:0">
-      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('editPamt').value=0">Clear</button>
+      <button class="btn btn-red btn-sm" onclick="clearPaymentWithReversal('${sid}','${mid}','${esc(mname)}',${totalOwed})">🔄 Clear + Revert</button>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('editPamt').value=0">Zero</button>
       <button class="btn btn-green btn-sm" onclick="document.getElementById('editPamt').value=${totalOwed.toFixed(2)}">Full</button>
       <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
       <button class="btn btn-gold" onclick="saveEditPayment('${sid}','${mid}',${totalOwed})">Update</button>
@@ -3277,6 +3321,91 @@ window.saveEditPayment = async function(sid,mid,totalOwed){
     toast('Payment updated!','success');
     loadChipinSession();
   }catch(e){toast(e.message,'error');}
+};
+
+
+// Clear a payment and revert ALL offsets it generated or received
+window.clearPaymentWithReversal = async function(sid, mid, mname, totalOwed){
+  if(!confirm('Clear '+mname+'\'s payment for this session and revert all related offsets?\n\nThis will:\n\u2022 Reset their payment to AED 0.00\n\u2022 Reverse any offsets they applied to others\n\u2022 Reverse any offsets applied to them from others')) return;
+
+  const s=STATE.sessions.find(x=>x.id===sid); if(!s) return;
+  const pay=(s.payments||[]).find(p=>p.memberId===mid);
+  const sessionUpdates={};
+  const projectUpdates={};
+
+  const getSessionPmts=function(ssid){
+    if(!sessionUpdates[ssid]){ const ss=STATE.sessions.find(x=>x.id===ssid); sessionUpdates[ssid]=[...(ss?.payments||[])]; }
+    return sessionUpdates[ssid];
+  };
+
+  // STEP 1: Revert offsets THIS player applied to others
+  const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+  const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
+  if(refundApplied+creditOffsetApplied>0.005){
+    STATE.sessions.forEach(function(ss){
+      const pmts=getSessionPmts(ss.id);
+      pmts.forEach(function(p,i){
+        const sources=p.offsetSources||[];
+        const src=sources.find(function(os){return os.payerId===mid&&os.payerSid===sid;});
+        if(!src) return;
+        const reversed=Math.max(0,(parseFloat(p.amountPaid)||0)-src.amount);
+        pmts[i]={...p, amountPaid:reversed, status:reversed>0.005?'partial':'unpaid',
+          offsetSources:sources.filter(function(os){return !(os.payerId===mid&&os.payerSid===sid);}),
+          note:'Offset reverted (source payment cleared)', updatedAt:new Date().toISOString()};
+      });
+    });
+    STATE.projects.forEach(function(proj){
+      const members=[...(proj.members||[])];
+      let changed=false;
+      members.forEach(function(pm,i){
+        const sources=pm.offsetSources||[];
+        const src=sources.find(function(os){return os.payerId===mid&&os.payerSid===sid;});
+        if(!src) return;
+        members[i]={...pm, amountPaid:Math.max(0,(parseFloat(pm.amountPaid)||0)-src.amount),
+          offsetSources:sources.filter(function(os){return !(os.payerId===mid&&os.payerSid===sid);}),
+          updatedAt:new Date().toISOString()};
+        changed=true;
+      });
+      if(changed) projectUpdates[proj.id]=members;
+    });
+  }
+
+  // STEP 2: Revert offsets applied TO this player from others
+  const theirSources=pay?.offsetSources||[];
+  theirSources.forEach(function(src){
+    const sourcePmts=getSessionPmts(src.payerSid);
+    const srcIdx=sourcePmts.findIndex(function(p){return p.memberId===src.payerId;});
+    if(srcIdx<0) return;
+    const srcPay=sourcePmts[srcIdx];
+    const prevRefund=parseFloat(srcPay.refundApplied)||0;
+    const prevCredit=parseFloat(srcPay.creditOffsetApplied)||0;
+    const revertFromRefund=Math.min(src.amount, prevRefund);
+    const revertFromCredit=Math.min(src.amount-revertFromRefund, prevCredit);
+    sourcePmts[srcIdx]={...srcPay,
+      refundApplied:Math.max(0,prevRefund-revertFromRefund),
+      creditOffsetApplied:Math.max(0,prevCredit-revertFromCredit),
+      updatedAt:new Date().toISOString()};
+  });
+
+  // STEP 3: Clear this player's own payment record
+  const ownPmts=getSessionPmts(sid);
+  const ownIdx=ownPmts.findIndex(function(p){return p.memberId===mid;});
+  const cleared={memberId:mid, amountPaid:0, status:'unpaid',
+    refundApplied:0, creditOffsetApplied:0, offsetSources:[],
+    note:'Payment cleared + offsets reverted', updatedAt:new Date().toISOString()};
+  if(ownIdx>=0) ownPmts[ownIdx]=cleared; else ownPmts.push(cleared);
+
+  // STEP 4: Batch write all changes
+  try{
+    const writes=Object.entries(sessionUpdates).map(function(e){return updateDoc(doc(db,'sessions',e[0]),{payments:e[1]});});
+    Object.entries(projectUpdates).forEach(function(e){writes.push(updateDoc(doc(db,'projects',e[0]),{members:e[1]}));});
+    await Promise.all(writes);
+    closeModal('payModal');
+    const pCount=Object.keys(projectUpdates).length;
+    const sCount=Math.max(0,Object.keys(sessionUpdates).length-1);
+    toast('Payment cleared. Reverted offsets across '+sCount+' session(s)'+(pCount?' + '+pCount+' project(s)':'')+'.','success');
+    loadChipinSession();
+  }catch(e){ toast(e.message,'error'); }
 };
 
 window.saveChipinPayment = async function(sid,mid){
@@ -3506,17 +3635,59 @@ window.showProjectDetail = function(pid){
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       const status=!due?'noamt':bal<0.005&&(due>0||paid>0)?'paid':paid>0?'partial':'unpaid';
-      return `<div class="chipin-row ${status}" style="margin-bottom:5px">
-        <div style="display:flex;align-items:center;gap:8px;flex:1">
-          <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(nm)}22;color:${avatarColor(nm)}">${initials(nm)}</div>
-          <div>
-            <div style="font-size:13px;font-weight:600">${esc(nm)}</div>
-            <div style="font-size:10px;color:var(--text3)">Due ${fmtMoney(due)} · Paid ${fmtMoney(paid)} · Bal <span style="color:${bal>0?'var(--red)':'var(--green)'}">${fmtMoney(bal)}</span></div>
+
+      // Build offset sources info — look up payer name and session date
+      const offsetSources=pm.offsetSources||[];
+      const totalOffset=offsetSources.reduce((s,os)=>s+(os.amount||0),0);
+      const cashPaid=Math.max(0,paid-totalOffset);
+      const offsetRows=offsetSources.map(function(os){
+        const payer=STATE.members.find(function(x){return x.id===os.payerId;});
+        const payerNm=payer?payer.name:'Unknown';
+        const sess=STATE.sessions.find(function(x){return x.id===os.payerSid;});
+        const sessLabel=sess?(fmtDate(sess.date)+(sess.venue?' · '+esc(sess.venue):'')):'Unknown session';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(0,212,255,0.12);font-size:10px">'
+          +'<span style="color:var(--text2)">↩ From <strong style="color:var(--primary)">'+esc(payerNm)+'</strong> · '+sessLabel+'</span>'
+          +'<span style="color:var(--primary);font-family:\'Barlow Condensed\',sans-serif;font-weight:700">'+fmtMoney(os.amount)+'</span>'
+          +'</div>';
+      }).join('');
+
+      const hasOffset=totalOffset>0.005;
+      const rowId='proj-src-'+pm.memberId;
+
+      return `<div class="chipin-row ${status}" style="margin-bottom:5px;${hasOffset?'border-color:rgba(0,212,255,0.3);background:rgba(0,212,255,0.03)':''}">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(nm)}22;color:${avatarColor(nm)}">${initials(nm)}</div>
+            <div style="min-width:0;flex:1">
+              <div style="font-size:13px;font-weight:600">${esc(nm)}</div>
+              <div style="font-size:10px;color:var(--text3)">
+                Due ${fmtMoney(due)}
+                ${cashPaid>0.005?` · Cash <span style="color:var(--green)">${fmtMoney(cashPaid)}</span>`:''}
+                ${hasOffset?` · Offset <span style="color:var(--primary)">${fmtMoney(totalOffset)}</span>`:''}
+                · Bal <span style="color:${bal>0?'var(--red)':'var(--green)'}">${fmtMoney(bal)}</span>
+              </div>
+              ${hasOffset?`<div style="margin-top:3px">
+                <button class="btn btn-ghost btn-xs" style="font-size:9px;color:var(--primary);border-color:rgba(0,212,255,0.3);padding:2px 7px"
+                  onclick="(function(){var el=document.getElementById('${rowId}');el.style.display=el.style.display==='none'?'block':'none';})()">
+                  ↩ ${offsetSources.length} offset source${offsetSources.length!==1?'s':''} — tap to ${hasOffset?'view':'hide'}
+                </button>
+              </div>`:''}
+            </div>
           </div>
+          ${hasOffset?`<div id="${rowId}" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(0,212,255,0.06);border-radius:var(--radius2);border:1px solid rgba(0,212,255,0.15)">
+            <div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--primary);font-family:'Barlow Condensed',sans-serif;margin-bottom:5px">Payment Sources</div>
+            ${cashPaid>0.005?`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(0,212,255,0.12);font-size:10px"><span style="color:var(--text2)">💵 Direct cash payment</span><span style="color:var(--green);font-family:'Barlow Condensed',sans-serif;font-weight:700">${fmtMoney(cashPaid)}</span></div>`:''}
+            ${offsetRows}
+            <div style="display:flex;justify-content:space-between;align-items:center;padding-top:5px;font-size:11px;font-weight:600">
+              <span style="color:var(--text2)">Total paid</span>
+              <span style="color:var(--green);font-family:'Barlow Condensed',sans-serif">${fmtMoney(paid)}</span>
+            </div>
+          </div>`:''}
         </div>
-        <div style="display:flex;gap:5px;align-items:center">
+        <div style="display:flex;gap:5px;align-items:center;flex-shrink:0;margin-left:8px">
           ${status==='paid'?'<span class="badge badge-green">Paid</span>':status==='partial'?'<span class="badge badge-gold">Partial</span>':status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':''}
-          ${(canEdit||(isMember&&pm.memberId===myId))?`<button class="btn btn-ghost btn-xs" onclick="closeModal('detailModal');openProjectPayModal('${p.id}','${pm.memberId}','${esc(nm)}',${paid},${due})">Pay</button>`:''}
+          ${hasOffset?`<span class="badge badge-primary" style="font-size:9px">↩ Offset</span>`:''}
+          ${(canEdit||(isMember&&pm.memberId===myId))?`<button class="btn btn-ghost btn-xs" onclick="openProjectPayModal('${p.id}','${pm.memberId}','${esc(nm)}',${paid},${due})">Pay</button>`:''}
         </div>
       </div>`;
     }).join('')}
@@ -3529,27 +3700,71 @@ window.showProjectDetail = function(pid){
 };
 
 window.openProjectPayModal = function(pid,mid,mname,currentPaid,due){
-  document.getElementById('payModalBody').innerHTML=`
-    <div class="modal-header" style="margin-bottom:12px">
-      <div class="modal-title">💰 Project Payment</div>
-      <button class="modal-close" onclick="closeModal('payModal');showProjectDetail('${pid}');openModal('detailModal')">✕</button>
-    </div>
-    <div style="margin-bottom:12px">
-      <div style="font-size:14px;font-weight:600">${esc(mname)}</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:2px">Due: <span style="color:var(--gold)">${fmtMoney(due)}</span> · Paid so far: <span style="color:var(--green)">${fmtMoney(currentPaid)}</span></div>
-    </div>
-    <div class="form-group"><label class="form-label">Amount Paid (AED)</label>
-      <input type="number" class="form-input" id="ppAmt" value="${currentPaid.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
-    </div>
-    <div class="form-group"><label class="form-label">Custom Due Amount (override, optional)</label>
-      <input type="number" class="form-input" id="ppDue" value="${due.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
-    </div>
-    <div class="modal-footer" style="margin-top:0;padding-bottom:0">
-      ${due?`<button class="btn btn-green btn-sm" onclick="document.getElementById('ppAmt').value='${due.toFixed(2)}'">Full</button>`:''}
-      <button class="btn btn-ghost" onclick="closeModal('payModal');showProjectDetail('${pid}');openModal('detailModal')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveProjectPayment('${pid}','${mid}')">Save</button>
-    </div>
-  `;
+  const p=STATE.projects.find(x=>x.id===pid);
+  const pm=p?(p.members||[]).find(x=>x.memberId===mid):null;
+  const offsetSources=(pm&&pm.offsetSources)||[];
+  const totalOffset=offsetSources.reduce(function(s,os){return s+(os.amount||0);},0);
+  const cashPaid=Math.max(0,currentPaid-totalOffset);
+  const hasOffset=totalOffset>0.005;
+
+  // Legacy fallback: parse payer name from note (e.g. "Offset from Cheng refund (AED 37.00)")
+  const memberNote=pm&&pm.note?pm.note:'';
+  const legacyMatch=memberNote.match(/Offset from ([^(]+?)(?:\s+refund|\s+credit|\s+overpay)?\s*\(/i);
+  const legacyPayerName=legacyMatch?legacyMatch[1].trim():'';
+  const hasLegacyOffset=!hasOffset&&currentPaid>0.005&&legacyPayerName.length>0;
+
+  const offsetRows=offsetSources.map(function(os){
+    const payer=STATE.members.find(function(x){return x.id===os.payerId;});
+    const payerNm=payer?payer.name:'Unknown';
+    const sess=STATE.sessions.find(function(x){return x.id===os.payerSid;});
+    const sessLabel=sess?(fmtDate(sess.date)+(sess.venue?' \u00b7 '+esc(sess.venue):'')):'Unknown session';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(0,212,255,0.12)">'
+      +'<div><div style="font-size:11px;color:var(--text2)">'
+      +'\u21a9 Offset from <strong style="color:var(--primary)">'+esc(payerNm)+'</strong></div>'
+      +'<div style="font-size:10px;color:var(--text3)">'+sessLabel+'</div></div>'
+      +'<span style="font-family:\'Barlow Condensed\',sans-serif;font-size:13px;font-weight:700;color:var(--primary)">'+fmtMoney(os.amount)+'</span>'
+      +'</div>';
+  }).join('');
+
+  document.getElementById('payModalBody').innerHTML=
+    '<div class="modal-header" style="margin-bottom:12px">'
+      +'<div class="modal-title">\ud83d\udcb0 Project Payment</div>'
+      +'<button class="modal-close" onclick="closeModal(\'payModal\');document.getElementById(\'payModal\').classList.remove(\'elevated\')">\u2715</button>'
+    +'</div>'
+    +'<div style="margin-bottom:10px">'
+      +'<div style="font-size:14px;font-weight:600">'+esc(mname)+'</div>'
+      +'<div style="font-size:12px;color:var(--text3);margin-top:2px">Due: <span style="color:var(--gold)">'+fmtMoney(due)+'</span> \u00b7 Paid so far: <span style="color:var(--green)">'+fmtMoney(currentPaid)+'</span></div>'
+    +'</div>'
+    +(hasOffset
+      ?'<div style="background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.25);border-radius:var(--radius2);padding:10px 12px;margin-bottom:12px">'
+        +'<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--primary);font-family:\'Barlow Condensed\',sans-serif;margin-bottom:6px">\ud83d\udcb3 Payment Sources</div>'
+        +(cashPaid>0.005?'<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(0,212,255,0.12)"><div style="font-size:11px;color:var(--text2)">\ud83d\udcb5 Direct cash</div><span style="font-family:\'Barlow Condensed\',sans-serif;font-size:13px;font-weight:700;color:var(--green)">'+fmtMoney(cashPaid)+'</span></div>':'')
+        +offsetRows
+        +'<div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px"><span style="font-size:11px;font-weight:600;color:var(--text2)">Total paid</span><span style="font-family:\'Bebas Neue\',sans-serif;font-size:18px;color:var(--green)">'+fmtMoney(currentPaid)+'</span></div>'
+      +'</div>'
+      :'')
+    +(hasLegacyOffset
+      ?'<div style="background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.25);border-radius:var(--radius2);padding:10px 12px;margin-bottom:12px">'
+        +'<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--primary);font-family:\'Barlow Condensed\',sans-serif;margin-bottom:6px">\ud83d\udcb3 Payment Source</div>'
+        +'<div style="font-size:12px;color:var(--text2)">\u21a9 Offset from <strong style="color:var(--primary)">'+esc(legacyPayerName)+'</strong></div>'
+        +'<div style="font-size:10px;color:var(--text3);margin-top:3px">Amount: <span style="color:var(--primary);font-family:\'Barlow Condensed\',sans-serif;font-weight:700">'+fmtMoney(currentPaid)+'</span></div>'
+      +'</div>'
+      :'')
+    +(!hasOffset&&!hasLegacyOffset&&currentPaid>0.005
+      ?'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius2);padding:8px 12px;margin-bottom:12px"><div style="font-size:10px;color:var(--text3)">\ud83d\udcb5 Direct cash: <span style="color:var(--green);font-weight:600">'+fmtMoney(currentPaid)+'</span></div></div>'
+      :'')
+    +'<div class="form-group"><label class="form-label">Amount Paid (AED)</label>'
+      +'<input type="number" class="form-input" id="ppAmt" value="'+currentPaid.toFixed(2)+'" min="0" step="0.01" inputmode="decimal"/></div>'
+    +'<div class="form-group"><label class="form-label">Custom Due Amount (override, optional)</label>'
+      +'<input type="number" class="form-input" id="ppDue" value="'+due.toFixed(2)+'" min="0" step="0.01" inputmode="decimal"/></div>'
+    +'<div class="modal-footer" style="margin-top:0;padding-bottom:0">'
+      +(due?'<button class="btn btn-green btn-sm" onclick="document.getElementById(\'ppAmt\').value=\''+due.toFixed(2)+'\'">Full</button>':'')
+      +'<button class="btn btn-ghost" onclick="closeModal(\'payModal\');document.getElementById(\'payModal\').classList.remove(\'elevated\')">Cancel</button>'
+      +'<button class="btn btn-primary" onclick="saveProjectPayment(\''+pid+'\',\''+mid+'\')">Save</button>'
+    +'</div>';
+
+  // Elevate payModal above detailModal (detailModal stays open behind)
+  document.getElementById('payModal').classList.add('elevated');
   openModal('payModal');
 };
 
@@ -3564,8 +3779,8 @@ window.saveProjectPayment = async function(pid,mid){
     await updateDoc(doc(db,'projects',pid),{members});
     closeModal('payModal');
     toast('Payment saved!','success');
-    showProjectDetail(pid);
-    openModal('detailModal');
+    showProjectDetail(pid); // refresh detail body
+    // detailModal stays open — no need to reopen
   }catch(e){ toast(e.message,'error'); }
 };
 
