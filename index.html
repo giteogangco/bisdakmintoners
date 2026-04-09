@@ -592,13 +592,18 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
         <input type="number" class="form-input" id="efAmount" placeholder="0.00" min="0" step="0.01" inputmode="decimal"/>
       </div>
     </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Expense Date *</label>
+        <input type="date" class="form-input" id="efDate"/>
+      </div>
+      <div class="form-group"><label class="form-label">Paid By</label>
+        <select class="form-select" id="efPaidBy">
+          <option value="">— select member —</option>
+        </select>
+      </div>
+    </div>
     <div class="form-group"><label class="form-label">Description</label>
       <input class="form-input" id="efDesc" placeholder="e.g. Feather shuttles x5" autocomplete="off"/>
-    </div>
-    <div class="form-group"><label class="form-label">Paid By</label>
-      <select class="form-select" id="efPaidBy">
-        <option value="">— select member —</option>
-      </select>
     </div>
     <div class="form-group">
       <label class="form-label">Split Among</label>
@@ -971,13 +976,17 @@ function gatherOutstanding(){
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     att.forEach(aid=>{
-      const myShare=expenses.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0;
-        if(!amt) return sum;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-        if(!incl.includes(aid)) return sum;
-        return sum+Math.ceil((amt/incl.length)*100)/100;
-      },0)||parseFloat(s.perHead)||0;
+      const myShare=(()=>{
+        if(!expenses.length) return parseFloat(s.perHead)||0;
+        const fs=expenses.reduce((sum,e)=>{
+          const amt=parseFloat(e.amount)||0;
+          if(!amt) return sum;
+          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+          if(!incl.includes(aid)) return sum;
+          return sum+Math.round((amt/incl.length)*100)/100;
+        },0);
+        return fs>0?fs:(parseFloat(s.perHead)||0);
+      })();
       if(!myShare&&!expPayerTotals[aid]) return;
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
@@ -1057,13 +1066,17 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const expPaid=expPayerTotals[memberId]||0;
-    const myShare=expenses.reduce((sum,e)=>{
-      const amt=parseFloat(e.amount)||0;
-      if(!amt) return sum;
-      const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-      if(!incl.includes(memberId)) return sum;
-      return sum+Math.ceil((amt/incl.length)*100)/100;
-    },0)||parseFloat(s.perHead)||0;
+    const myShare=(()=>{
+      if(!expenses.length) return parseFloat(s.perHead)||0;
+      const fs=expenses.reduce((sum,e)=>{
+        const amt=parseFloat(e.amount)||0;
+        if(!amt) return sum;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+        if(!incl.includes(memberId)) return sum;
+        return sum+Math.round((amt/incl.length)*100)/100;
+      },0);
+      return fs>0?fs:(parseFloat(s.perHead)||0);
+    })();
     const pay=(s.payments||[]).find(p=>p.memberId===memberId);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
@@ -1965,7 +1978,10 @@ function renderExpenseBody(s){
   const el=document.getElementById('expenseBody');
   if(!el)return;
   const expenses=s.expenses||[];
+  const att=s.attendees||[];
   const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
+  // Use stored perHead if set; fallback to total/att for display only
+  const displayPerHead=parseFloat(s.perHead)||(att.length>0?total/att.length:0);
   const isAdmin=canAdmin();
   const byCategory={};
   expenses.forEach(e=>{byCategory[e.category]=(byCategory[e.category]||0)+(parseFloat(e.amount)||0);});
@@ -1978,8 +1994,8 @@ function renderExpenseBody(s){
       </div>
       <div class="grid3" style="margin-bottom:14px">
         <div class="stat-card"><div class="stat-label">Total Spent</div><div class="stat-val" style="font-size:22px;color:var(--red)">${fmtMoney(total)}</div></div>
-        <div class="stat-card"><div class="stat-label">Players</div><div class="stat-val" style="font-size:22px">${(s.attendees||[]).length}</div></div>
-        <div class="stat-card"><div class="stat-label">Per Head</div><div class="stat-val" style="font-size:22px;color:var(--gold)">${fmtMoney((s.attendees||[]).length>0?total/(s.attendees||[]).length:0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Players</div><div class="stat-val" style="font-size:22px">${att.length}</div></div>
+        <div class="stat-card"><div class="stat-label">Per Head</div><div class="stat-val" style="font-size:22px;color:var(--gold)">${fmtMoney(displayPerHead)}</div></div>
       </div>
       ${Object.keys(byCategory).length?`
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
@@ -1998,11 +2014,12 @@ function renderExpenseBody(s){
             <span style="font-size:18px">${{court:'🏟️',shuttle:'🏸',food:'🍱',equipment:'🎒',other:'📦'}[e.category]||'📦'}</span>
             <div style="min-width:0">
               <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(e.description||e.category)}</div>
-              <div style="font-size:10px;color:var(--text3)">Paid by: ${paidBy?esc(paidBy.nickname||paidBy.name.split(' ')[0]):'—'} · ${e.date||''}</div>
+              <div style="font-size:10px;color:var(--text3)">Paid by: ${paidBy?esc(paidBy.nickname||paidBy.name.split(' ')[0]):'—'}${e.date?' · '+fmtDate(e.date):''}</div>
               ${e.includedPlayers&&e.includedPlayers.length>0?`<div style="font-size:10px;color:var(--text3)">Split: ${e.includedPlayers.map(function(id){const m=STATE.members.find(function(x){return x.id===id;});return m?esc(m.nickname||m.name.split(' ')[0]):'?';}).join(', ')}</div>`:''}            </div>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             <span style="font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;color:var(--red)">${fmtMoney(e.amount)}</span>
+            ${isAdmin?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" onclick="openEditExpenseModal('${s.id}','${e.id}')">✏️</button>`:''}
             ${isAdmin?`<button class="btn btn-ghost btn-xs" onclick="deleteExpense('${s.id}','${e.id}')">✕</button>`:''}
           </div>
         </div>`;
@@ -2018,6 +2035,9 @@ window.openExpenseModal = function(sid){
   document.getElementById('efCat').value='court';
   document.getElementById('efAmount').value='';
   document.getElementById('efDesc').value='';
+  // Default expense date to the session date (most common case), allow override
+  const _sess=STATE.sessions.find(x=>x.id===sid);
+  document.getElementById('efDate').value=(_sess&&_sess.date)||new Date().toISOString().split('T')[0];
   const sel=document.getElementById('efPaidBy');
   sel.innerHTML='<option value="">— select member —</option>'+
     STATE.members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('');
@@ -2033,30 +2053,82 @@ window.openExpenseModal = function(sid){
   openModal('expenseModal');
 };
 
+window.openEditExpenseModal = function(sid, eid){
+  const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
+  const e=(s.expenses||[]).find(x=>x.id===eid);if(!e)return;
+  window._expenseSessionId=sid;
+  STATE.editingExpenseId=eid;
+  document.getElementById('expModalTitle').textContent='Edit Expense';
+  document.getElementById('efCat').value=e.category||'other';
+  document.getElementById('efAmount').value=e.amount||'';
+  document.getElementById('efDesc').value=e.description||'';
+  document.getElementById('efDate').value=e.date||s.date||new Date().toISOString().split('T')[0];
+  const sel=document.getElementById('efPaidBy');
+  sel.innerHTML='<option value="">— select member —</option>'+
+    STATE.members.map(m=>`<option value="${m.id}"${m.id===e.paidBy?' selected':''}>${esc(m.name)}</option>`).join('');
+  // Populate Split Among — pre-check players that were in includedPlayers (or all if none set)
+  const _expAttendees=(s.attendees)||[];
+  const _prevIncluded=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:_expAttendees;
+  const _playersEl=document.getElementById('efPlayers');
+  _playersEl.innerHTML=_expAttendees.map(function(mid){
+    const m=STATE.members.find(function(x){return x.id===mid;});
+    if(!m)return '';
+    const checked=_prevIncluded.includes(mid);
+    return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;background:var(--surface2);padding:3px 8px;border-radius:12px;cursor:pointer;"><input type="checkbox" class="ef-player-cb" value="'+mid+'"'+( checked?' checked':'')+' style="cursor:pointer;"> '+esc(m.nickname||m.name.split(' ')[0])+'</label>';
+  }).join('');
+  openModal('expenseModal');
+};
+
 window.saveExpense = async function(){
   const sid=window._expenseSessionId;
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const amount=parseFloat(document.getElementById('efAmount').value);
-  if(!amount||isNaN(amount)){toast('Valid amount required','error');return;}
-  const expense={
-    id:uid(),
-    category:document.getElementById('efCat').value,
-    amount,
-    description:document.getElementById('efDesc').value.trim(),
-    paidBy:document.getElementById('efPaidBy').value||null,
-    date:new Date().toISOString().split('T')[0],
-    includedPlayers:Array.from(document.querySelectorAll('.ef-player-cb:checked')).map(function(cb){return cb.value;})
-  };
-  const expenses=[...(s.expenses||[]),expense];
-  // Auto-calc perHead from total expenses
-  const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
+  if(!amount||isNaN(amount)||amount<=0){toast('Valid amount required','error');return;}
+  const expDate=document.getElementById('efDate').value||s.date||new Date().toISOString().split('T')[0];
+  const includedPlayers=Array.from(document.querySelectorAll('.ef-player-cb:checked')).map(function(cb){return cb.value;});
   const att=s.attendees||[];
-  const splitCount=expense.includedPlayers&&expense.includedPlayers.length>0?expense.includedPlayers.length:att.length;
-  const perHead=splitCount>0?Math.ceil((total/splitCount)*100)/100:0;
+
+  let expenses=[...(s.expenses||[])];
+  const editingId=STATE.editingExpenseId;
+
+  if(editingId){
+    // Edit mode — replace existing expense record
+    const idx=expenses.findIndex(e=>e.id===editingId);
+    if(idx<0){toast('Expense not found','error');return;}
+    expenses[idx]={
+      ...expenses[idx],
+      category:document.getElementById('efCat').value,
+      amount,
+      description:document.getElementById('efDesc').value.trim(),
+      paidBy:document.getElementById('efPaidBy').value||null,
+      date:expDate,
+      includedPlayers,
+      updatedAt:new Date().toISOString()
+    };
+  } else {
+    // Add mode — append new expense
+    expenses.push({
+      id:uid(),
+      category:document.getElementById('efCat').value,
+      amount,
+      description:document.getElementById('efDesc').value.trim(),
+      paidBy:document.getElementById('efPaidBy').value||null,
+      date:expDate,
+      includedPlayers,
+      createdAt:new Date().toISOString()
+    });
+  }
+
+  // Recalculate perHead: sum all expenses, divide by attendee count (consistent base for Chip-In)
+  const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
+  const perHead=att.length>0?Math.round((total/att.length)*100)/100:0;
+
   try{
     await updateDoc(doc(db,'sessions',sid),{expenses,perHead});
     closeModal('expenseModal');
-    toast('Expense logged!','success');
+    STATE.editingExpenseId=null;
+    toast(editingId?'Expense updated!':'Expense logged!','success');
+    // Firebase onSnapshot will auto-refresh all connected views
     loadExpenseSession();
   }catch(e){toast(e.message,'error');}
 };
@@ -2067,10 +2139,11 @@ window.deleteExpense = async function(sid,eid){
   const expenses=(s.expenses||[]).filter(e=>e.id!==eid);
   const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
   const att=s.attendees||[];
-  const perHead=att.length>0?Math.ceil((total/att.length)*100)/100:0;
+  const perHead=att.length>0?Math.round((total/att.length)*100)/100:0;
   try{
     await updateDoc(doc(db,'sessions',sid),{expenses,perHead});
     toast('Expense deleted','success');
+    // Firebase onSnapshot auto-refreshes all connected views
     loadExpenseSession();
   }catch(e){toast(e.message,'error');}
 };
@@ -2127,14 +2200,24 @@ function renderChipinBody(s){
   function getCarryover(memberId){
     let carry=0;
     STATE.sessions.filter(x=>x.id!==s.id&&new Date(x.date)<new Date(s.date)).forEach(ps=>{
-      const patt=ps.attendees||[];if(!patt.includes(memberId))return;
-      const pexp=(ps.expenses||[]).reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-      const ppShare=(ps.expenses||[]).reduce((sum,e)=>{const amt=parseFloat(e.amount)||0;if(!amt)return sum;const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:patt;if(!incl.includes(memberId))return sum;return sum+Math.ceil((amt/incl.length)*100)/100;},0)||parseFloat(ps.perHead)||0;
+      const pAtt=ps.attendees||[];if(!pAtt.includes(memberId))return;
+      const pExp=ps.expenses||[];
+      // ppShare: per-expense share for this member in the past session, fallback to stored perHead
+      const ppShare=(()=>{
+        if(!pExp.length) return parseFloat(ps.perHead)||0;
+        const fromExpenses=pExp.reduce((sum,e)=>{
+          const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:pAtt;
+          if(!incl.includes(memberId))return sum;
+          return sum+Math.round((amt/incl.length)*100)/100;
+        },0);
+        return fromExpenses>0?fromExpenses:(parseFloat(ps.perHead)||0);
+      })();
       if(!ppShare)return;
 
       // How much did this member pay for expenses in this past session?
       const prevExpPayerTotals={};
-      (ps.expenses||[]).forEach(e=>{ if(e.paidBy) prevExpPayerTotals[e.paidBy]=(prevExpPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+      pExp.forEach(e=>{ if(e.paidBy) prevExpPayerTotals[e.paidBy]=(prevExpPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
       const prevExpPaid=prevExpPayerTotals[memberId]||0;
 
       // What they actually owed for that session (their share minus any expenses they covered)
@@ -2173,7 +2256,17 @@ function renderChipinBody(s){
     const expPaid=expensePayerTotals[aid]||0;
 
     // Net refund for THIS session = expenses paid out minus their own per-head share
-    const myShare=expenses.reduce((sum,e)=>{const amt=parseFloat(e.amount)||0;if(!amt)return sum;const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;if(!incl.includes(aid))return sum;return sum+Math.ceil((amt/incl.length)*100)/100;},0)||perHead;
+    // myShare: sum of this player's share from each expense (respecting includedPlayers), fallback to stored perHead
+    const myShare=(()=>{
+      if(!expenses.length) return perHead;
+      const fromExpenses=expenses.reduce((sum,e)=>{
+        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+        if(!incl.includes(aid))return sum;
+        return sum+Math.round((amt/incl.length)*100)/100;
+      },0);
+      return fromExpenses>0?fromExpenses:perHead;
+    })();
     const netRefund=expPaid-myShare; // positive = group owes them cash back
     const isExpensePayer=expPaid>0&&netRefund>0;
 
@@ -2537,17 +2630,26 @@ window.autoSettleCarryOver = async function(sid, payerId, payerName, carryDebt){
     const pAtt=ps.attendees||[];
     if(!pAtt.includes(payerId)) continue;
     const pExp=ps.expenses||[];
-    const pExpTotal=pExp.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const pPH=parseFloat(ps.perHead)||(pAtt.length>0?pExpTotal/pAtt.length:0);
-    if(!pPH) continue;
+    // Use includedPlayers-aware share for consistency
+    const pMyShare=(()=>{
+      if(!pExp.length) return parseFloat(ps.perHead)||0;
+      const fs=pExp.reduce((sum,e)=>{
+        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:pAtt;
+        if(!incl.includes(payerId))return sum;
+        return sum+Math.round((amt/incl.length)*100)/100;
+      },0);
+      return fs>0?fs:(parseFloat(ps.perHead)||0);
+    })();
+    if(!pMyShare) continue;
 
     const pExpPayer={};
     pExp.forEach(e=>{ if(e.paidBy) pExpPayer[e.paidBy]=(pExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const pExpPaid=pExpPayer[payerId]||0;
-    const pNetRef=pExpPaid-pPH;
+    const pNetRef=pExpPaid-pMyShare;
     if(pNetRef>0) continue; // was an expense payer in that session — skip
 
-    const pOwed=Math.max(0,pPH-pExpPaid);
+    const pOwed=Math.max(0,pMyShare-pExpPaid);
     const pmts=getPayments(ps.id);
     const pPayIdx=pmts.findIndex(p=>p.memberId===payerId);
     const pPaid=pPayIdx>=0?parseFloat(pmts[pPayIdx].amountPaid)||0:0;
@@ -2601,17 +2703,26 @@ window.openPayModal = function(sid,mid,mname,currentPaid,perHead){
     const sAtt=s.attendees||[];
     if(!sAtt.includes(mid)) return;
     const sExp=s.expenses||[];
-    const sExpTotal=sExp.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const sPH=parseFloat(s.perHead)||(sAtt.length>0?sExpTotal/sAtt.length:0);
-    if(!sPH) return;
+    // Compute this member's true share via includedPlayers (consistent with renderChipinBody)
+    const sMyShare=(()=>{
+      if(!sExp.length) return parseFloat(s.perHead)||0;
+      const fs=sExp.reduce((sum,e)=>{
+        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:sAtt;
+        if(!incl.includes(mid))return sum;
+        return sum+Math.round((amt/incl.length)*100)/100;
+      },0);
+      return fs>0?fs:(parseFloat(s.perHead)||0);
+    })();
+    if(!sMyShare) return;
     const sExpPayer={};
     sExp.forEach(e=>{ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const sExpPaid=sExpPayer[mid]||0;
-    const sNetRef=sExpPaid-sPH;
-    if(sNetRef>0) return; // expense payer with refund — skip
+    const sNetRef=sExpPaid-sMyShare;
+    if(sNetRef>0) return; // expense payer with net refund — skip
     const sPay=(s.payments||[]).find(p=>p.memberId===mid);
     const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
-    const sOwed=Math.max(0,sPH-sExpPaid);
+    const sOwed=Math.max(0,sMyShare-sExpPaid);
     const sBal=sOwed-sPaid;
     if(sBal>0.005) allSessionDebts.push({sid:s.id, label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''), owed:sOwed, paid:sPaid, bal:sBal});
   });
@@ -3053,9 +3164,16 @@ function renderHistory(el){
 
 function renderHistoryCard(s){
   const att=s.attendees||[];const payments=s.payments||[];
-  const perHead=parseFloat(s.perHead)||0;
+  const expenses=s.expenses||[];
+  const totalExp=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
+  const perHead=parseFloat(s.perHead)||(att.length>0?totalExp/att.length:0);
   const totalPaid=payments.reduce((sum,p)=>sum+(parseFloat(p.amountPaid)||0),0);
   const matches=(s.matches||[]).filter(m=>m.result);
+
+  // Build expense payer totals for history badge logic
+  const expPayerTotals={};
+  expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+
   return `<div class="card" style="margin-bottom:12px">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div>
@@ -3080,8 +3198,28 @@ function renderHistoryCard(s){
         ${STATE.members.filter(m=>att.includes(m.id)).map(m=>{
           const pay=payments.find(p=>p.memberId===m.id);
           const paid=pay?parseFloat(pay.amountPaid)||0:0;
-          const bal=perHead?perHead-paid:0;
-          const status=!perHead?'':paid>=perHead?'<span class="badge badge-green">Paid</span>':paid>0?'<span class="badge badge-gold">Part</span>':'<span class="badge badge-red">Unpaid</span>';
+          const expPaid=expPayerTotals[m.id]||0;
+          // Per-member share from expenses (respecting includedPlayers)
+          const myShare=perHead?(()=>{
+            if(!expenses.length)return perHead;
+            const fs=expenses.reduce((sum,e)=>{
+              const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+              const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+              if(!incl.includes(m.id))return sum;
+              return sum+Math.round((amt/incl.length)*100)/100;
+            },0);
+            return fs>0?fs:perHead;
+          })():0;
+          const isExpPayer=expPaid>0&&expPaid>myShare;
+          const owed=isExpPayer?0:Math.max(0,myShare-expPaid);
+          let status='';
+          if(perHead){
+            if(isExpPayer) status='<span class="badge badge-primary">Paid Exp</span>';
+            else if(paid>=owed&&owed>0) status='<span class="badge badge-green">Paid</span>';
+            else if(paid>0) status='<span class="badge badge-gold">Part</span>';
+            else if(owed>0) status='<span class="badge badge-red">Unpaid</span>';
+            else status='<span class="badge badge-ghost">—</span>';
+          }
           const wins=matches.filter(mx=>((mx.result==='teamA'?mx.team1:mx.result==='teamB'?mx.team2:[])||[]).includes(m.id)).length;
           const losses=matches.filter(mx=>((mx.result==='teamA'?mx.team2:mx.result==='teamB'?mx.team1:[])||[]).includes(m.id)).length;
           const matchesPlayed=matches.filter(mx=>(mx.team1||[]).concat(mx.team2||[]).includes(m.id)).length;
@@ -3092,7 +3230,7 @@ function renderHistoryCard(s){
               ${esc(m.nickname||m.name.split(' ')[0])}
             </div></td>
             <td>${skillBadge(m.skill||'Beginner')}</td>
-            ${perHead?`<td style="font-family:'Barlow Condensed',sans-serif;font-size:11px">${fmtMoney(paid)}</td><td>${status}</td>`:''}
+            ${perHead?`<td style="font-family:'Barlow Condensed',sans-serif;font-size:11px">${isExpPayer?'<span style="color:var(--primary)">Exp Payer</span>':fmtMoney(paid)}</td><td>${status}</td>`:''}
             ${matches.length?`<td style="font-size:11px"><span style="color:var(--green)">${wins}W</span> <span style="color:var(--red)">${losses}L</span></td><td style="font-size:11px;color:var(--orange);font-family:'Barlow Condensed',sans-serif">${cal}</td>`:''}
           </tr>`;
         }).join('')}
@@ -3138,9 +3276,19 @@ window.showSessionDetail = function(sid){
     <div class="card-title" style="margin-top:14px">Expenses</div>
     ${(s.expenses||[]).map(e=>{
       const pb=STATE.members.find(x=>x.id===e.paidBy);
-      return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
-        <span>${EXP_CATS[e.category]||e.category} — ${esc(e.description||'')}</span>
-        <span style="color:var(--red);font-family:'Barlow Condensed',sans-serif">${fmtMoney(e.amount)} ${pb?'('+esc(pb.name.split(' ')[0])+')':''}</span>
+      const incl=e.includedPlayers&&e.includedPlayers.length>0
+        ?e.includedPlayers.map(id=>{const mm=STATE.members.find(x=>x.id===id);return mm?esc(mm.nickname||mm.name.split(' ')[0]):'?';}).join(', ')
+        :'All';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <span style="font-weight:600">${EXP_CATS[e.category]||e.category}${e.description?' — '+esc(e.description):''}</span>
+          <span style="color:var(--red);font-family:'Barlow Condensed',sans-serif;white-space:nowrap;font-weight:700">${fmtMoney(e.amount)}</span>
+        </div>
+        <div style="color:var(--text3);font-size:10px;margin-top:2px">
+          ${pb?`Paid by: <span style="color:var(--primary)">${esc(pb.nickname||pb.name.split(' ')[0])}</span> · `:''}
+          ${e.date?`${fmtDate(e.date)} · `:''}
+          Split: ${incl}
+        </div>
       </div>`;}).join('')}
     `:''}
     ${canAdmin()?`<hr class="divider"><button class="btn btn-red btn-sm btn-block" onclick="deleteSession('${s.id}','${esc(fmtDate(s.date))}')">🗑 Delete This Session</button>`:''}
@@ -3164,10 +3312,10 @@ function renderSettings(el){
     <div class="grid2">
       <div class="card">
         <div class="card-title">🔐 Passcodes</div>
-        <div class="form-group"><label class="form-label">Member PIN</label><input class="form-input" id="setPinMember" maxlength="4" value="${STATE.passcodes.member||'1111'}" inputmode="numeric"/></div>
-        <div class="form-group"><label class="form-label">Admin PIN</label><input class="form-input" id="setPinAdmin" maxlength="4" value="${STATE.passcodes.admin||'2222'}" inputmode="numeric"/></div>
-        <div class="form-group"><label class="form-label">Super Admin PIN</label><input class="form-input" id="setPinSuper" maxlength="4" value="${STATE.passcodes.superadmin||'9999'}" inputmode="numeric"/></div>
-        <button class="btn btn-primary btn-block" onclick="saveSettings()">Save Passcodes</button>
+        <div class="form-group"><label class="form-label">Member PIN</label><input class="form-input" id="pageSetPinMember" maxlength="4" value="${STATE.passcodes.member||'1111'}" inputmode="numeric"/></div>
+        <div class="form-group"><label class="form-label">Admin PIN</label><input class="form-input" id="pageSetPinAdmin" maxlength="4" value="${STATE.passcodes.admin||'2222'}" inputmode="numeric"/></div>
+        <div class="form-group"><label class="form-label">Super Admin PIN</label><input class="form-input" id="pageSetPinSuper" maxlength="4" value="${STATE.passcodes.superadmin||'9999'}" inputmode="numeric"/></div>
+        <button class="btn btn-primary btn-block" onclick="saveSettingsPage()">Save Passcodes</button>
       </div>
       <div class="card">
         <div class="card-title">📊 Data</div>
@@ -3186,6 +3334,18 @@ window.saveSettings = async function(){
   const m=document.getElementById('setPinMember')?.value||'1111';
   const a=document.getElementById('setPinAdmin')?.value||'2222';
   const s=document.getElementById('setPinSuper')?.value||'9999';
+  if([m,a,s].some(p=>p.length!==4||isNaN(parseInt(p)))){ toast('4-digit PINs required','error'); return; }
+  try{
+    await setDoc(doc(db,'settings','passcodes'),{member:m,admin:a,superadmin:s});
+    STATE.passcodes={member:m,admin:a,superadmin:s};
+    toast('Passcodes saved!','success');
+  }catch(e){ toast(e.message,'error'); }
+};
+
+window.saveSettingsPage = async function(){
+  const m=document.getElementById('pageSetPinMember')?.value||'1111';
+  const a=document.getElementById('pageSetPinAdmin')?.value||'2222';
+  const s=document.getElementById('pageSetPinSuper')?.value||'9999';
   if([m,a,s].some(p=>p.length!==4||isNaN(parseInt(p)))){ toast('4-digit PINs required','error'); return; }
   try{
     await setDoc(doc(db,'settings','passcodes'),{member:m,admin:a,superadmin:s});
