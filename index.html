@@ -2474,18 +2474,99 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   const eligiblePlayers = Object.values(memberDebts).sort((a,b)=>b.totalBal-a.totalBal)
     .map(d=>({...d, remaining:d.totalBal}));
 
-  // Store offset selections: { [aid]: offsetAmt }
+  // _offsetSelections: { aid: { sessionId: amount } } — per-session granular selections
   window._offsetSelections = {};
   window._offsetRefundTotal = refundAmt;
   window._offsetPayerId = payerId;
   window._offsetPayerName = payerName;
   window._offsetSid = sid;
   window._offsetEligible = eligiblePlayers;
+  // Auto-expand single-session players; collapse multi-session by default
+  window._offsetExpanded = {};
+  eligiblePlayers.forEach(function(p){
+    if((p.sessions||[]).length===1) window._offsetExpanded[p.aid]=true;
+  });
+
+  function _offsetTotalApplied(){
+    let t=0;
+    Object.values(window._offsetSelections).forEach(function(sessMap){
+      Object.values(sessMap).forEach(function(v){ t+=v; });
+    });
+    return t;
+  }
+
+  function _offsetUpdateTotals(){
+    const applied=_offsetTotalApplied();
+    const rem=refundAmt-applied;
+    const remEl=document.getElementById('refundRemainingVal');
+    const appEl=document.getElementById('refundAppliedVal');
+    const applyBtn=document.getElementById('offsetApplyBtn');
+    if(remEl){ remEl.textContent=fmtMoney(Math.max(0,rem)); remEl.style.color=rem>0.005?'var(--gold)':'var(--green)'; }
+    if(appEl) appEl.textContent=fmtMoney(applied);
+    if(applyBtn){ applyBtn.disabled=applied<0.01; applyBtn.textContent='Apply Offset'+(applied>0.01?' ('+fmtMoney(applied)+')':''); }
+    // Status banners
+    const fullBanner=document.getElementById('offsetFullBanner');
+    const partialBanner=document.getElementById('offsetPartialBanner');
+    if(fullBanner) fullBanner.style.display=(applied>0&&rem<0.01)?'block':'none';
+    if(partialBanner) partialBanner.style.display=(rem>0.005&&applied>0)?'block':'none';
+    if(partialBanner) partialBanner.querySelector('.offset-remaining-amt').textContent=fmtMoney(Math.max(0,rem));
+  }
+
+  window._offsetSessChange = function(aid, sessId, maxBal){
+    const cb=document.getElementById('ofcb_'+aid+'_'+sessId);
+    const amtEl=document.getElementById('ofamt_'+aid+'_'+sessId);
+    if(!cb||!amtEl) return;
+    if(!window._offsetSelections[aid]) window._offsetSelections[aid]={};
+    if(cb.checked){
+      amtEl.disabled=false;
+      amtEl.closest('div').style.opacity='1';
+      // Default: fill up to min(balance, remaining refund)
+      const applied=_offsetTotalApplied();
+      const rem=refundAmt-applied;
+      const cur=parseFloat(amtEl.value)||0;
+      const defaultAmt=Math.min(maxBal,Math.max(0,rem));
+      amtEl.value=(cur<=0.005?defaultAmt:Math.min(cur,maxBal)).toFixed(2);
+      window._offsetSelections[aid][sessId]=parseFloat(amtEl.value)||0;
+    } else {
+      amtEl.disabled=true;
+      amtEl.closest('div').style.opacity='0.4';
+      amtEl.value='0.00';
+      delete window._offsetSelections[aid][sessId];
+      if(!Object.keys(window._offsetSelections[aid]).length) delete window._offsetSelections[aid];
+    }
+    _offsetUpdateTotals();
+  };
+
+  window._offsetAmtChange = function(aid, sessId){
+    const amtEl=document.getElementById('ofamt_'+aid+'_'+sessId);
+    if(!amtEl) return;
+    if(!window._offsetSelections[aid]) window._offsetSelections[aid]={};
+    let v=parseFloat(amtEl.value)||0;
+    // Clamp to the max attribute (session balance) so display stays accurate
+    const maxBal=parseFloat(amtEl.max)||v;
+    if(v>maxBal){ v=maxBal; amtEl.value=maxBal.toFixed(2); }
+    if(v>0.005) window._offsetSelections[aid][sessId]=v;
+    else { delete window._offsetSelections[aid][sessId]; if(!Object.keys(window._offsetSelections[aid]).length) delete window._offsetSelections[aid]; }
+    _offsetUpdateTotals();
+  };
+
+  window._offsetToggleExpand = function(aid){
+    window._offsetExpanded[aid]=!window._offsetExpanded[aid];
+    const sessBlock=document.getElementById('offsetSess_'+aid);
+    if(!sessBlock) return;
+    const expandBtn=document.getElementById('offsetExpandBtn_'+aid);
+    if(window._offsetExpanded[aid]){
+      sessBlock.style.display='block';
+      if(expandBtn) expandBtn.textContent='▲ Collapse';
+    } else {
+      sessBlock.style.display='none';
+      if(expandBtn) expandBtn.textContent='▼ Sessions';
+    }
+  };
 
   function renderOffsetModal(){
-    const selections = window._offsetSelections;
-    const totalApplied = Object.values(selections).reduce((s,v)=>s+v,0);
-    const remaining = refundAmt - totalApplied;
+    const applied=_offsetTotalApplied();
+    const remaining=refundAmt-applied;
 
     document.getElementById('payModalBody').innerHTML=`
       <div class="modal-header" style="margin-bottom:14px">
@@ -2495,74 +2576,78 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       <div style="font-size:13px;margin-bottom:6px">
         <strong>${esc(payerName)}</strong> is owed back <span style="color:var(--primary);font-weight:700">${fmtMoney(refundAmt)}</span>.
       </div>
-      <div style="font-size:11px;color:var(--text2);margin-bottom:14px">Select one or more players — their balance will be reduced instead of cash being returned to ${esc(payerName)}.</div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:12px">Pick which sessions to offset per player — check a session, set the amount, then Apply.</div>
 
-      <!-- Running refund tracker -->
-      <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius2);padding:10px 12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <!-- Running totals -->
+      <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius2);padding:10px 12px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
         <div>
           <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:2px">Refund Remaining</div>
-          <div id="refundRemainingVal" style="font-family:'Bebas Neue',sans-serif;font-size:26px;line-height:1;color:${remaining>0.005?'var(--gold)':'var(--green)'}">${fmtMoney(remaining)}</div>
+          <div id="refundRemainingVal" style="font-family:'Bebas Neue',sans-serif;font-size:26px;line-height:1;color:${remaining>0.005?'var(--gold)':'var(--green)'}">${fmtMoney(Math.max(0,remaining))}</div>
         </div>
         <div style="text-align:right">
           <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:2px">Applied So Far</div>
-          <div id="refundAppliedVal" style="font-family:'Bebas Neue',sans-serif;font-size:20px;line-height:1;color:var(--green)">${fmtMoney(totalApplied)}</div>
+          <div id="refundAppliedVal" style="font-family:'Bebas Neue',sans-serif;font-size:20px;line-height:1;color:var(--green)">${fmtMoney(applied)}</div>
         </div>
       </div>
 
       <!-- Player rows -->
       <div id="offsetPlayerRows">
-        ${eligiblePlayers.map(p=>{
-          const sel=selections[p.aid]||0;
-          const isAdded=sel>0;
-          const hasMultiple=(p.sessions||[]).length>1;
-          return `<div style="padding:9px 10px;border-radius:var(--radius2);margin-bottom:5px;border:1px solid ${isAdded?'rgba(0,212,255,0.35)':'var(--border)'};background:${isAdded?'rgba(0,212,255,0.05)':'var(--surface2)'}">
-            <div style="display:flex;align-items:center;gap:8px">
+        ${eligiblePlayers.map(function(p){
+          const playerSel=window._offsetSelections[p.aid]||{};
+          const playerApplied=Object.values(playerSel).reduce(function(s,v){return s+v;},0);
+          const isExpanded=!!window._offsetExpanded[p.aid];
+          const hasSessions=(p.sessions||[]).length>0;
+          return `<div style="border:1px solid ${playerApplied>0?'rgba(0,212,255,0.35)':'var(--border)'};border-radius:var(--radius2);margin-bottom:6px;overflow:hidden;background:${playerApplied>0?'rgba(0,212,255,0.04)':'var(--surface2)'}">
+            <!-- Player header -->
+            <div style="display:flex;align-items:center;gap:8px;padding:9px 10px;">
               <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(p.nm)}22;color:${avatarColor(p.nm)}">${initials(p.nm)}</div>
               <div style="flex:1;min-width:0">
                 <div style="font-size:12px;font-weight:600">${esc(p.nm)}</div>
                 <div style="font-size:10px;color:var(--text3)">
-                  Total owes: <span style="color:var(--red)">${fmtMoney(p.remaining)}</span>${hasMultiple?` <span style="color:var(--text3)">(${(p.sessions||[]).length} sessions)</span>`:''}
-                  ${isAdded?` · <span style="color:var(--green)">−${fmtMoney(sel)} → bal ${fmtMoney(Math.max(0,p.remaining-sel))}</span>`:''}
+                  Total owes: <span style="color:var(--red)">${fmtMoney(p.totalBal)}</span>
+                  <span style="color:var(--text3)"> · ${(p.sessions||[]).length} session${(p.sessions||[]).length!==1?'s':''}</span>
+                  ${playerApplied>0.005?` · <span style="color:var(--green)">−${fmtMoney(playerApplied)} selected</span>`:''}
                 </div>
               </div>
-              ${isAdded
-                ? `<div style="display:flex;align-items:center;gap:5px">
-                    <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;color:var(--green)">−${fmtMoney(sel)}</span>
-                    <button class="btn btn-red btn-xs" onclick="removeOffsetPlayer('${p.aid}')">✕</button>
-                  </div>`
-                : `<button class="btn btn-ghost btn-xs" ${remaining<0.01?'disabled':''} onclick="addOffsetPlayer('${p.aid}',${p.remaining})">+ Add</button>`
-              }
+              ${hasSessions&&(p.sessions||[]).length>1?`<button id="offsetExpandBtn_${p.aid}" class="btn btn-ghost btn-xs" onclick="_offsetToggleExpand('${p.aid}')">${isExpanded?'▲ Collapse':'▼ Sessions'}</button>`:''}
             </div>
-            ${hasMultiple?`<div style="margin-top:5px;padding-left:34px">
-              ${(p.sessions||[]).map(d=>`<div style="font-size:9px;color:var(--text3);display:flex;justify-content:space-between"><span>${d.label}</span><span style="color:var(--orange)">${fmtMoney(d.bal)}</span></div>`).join('')}
-            </div>`:''}
+
+            <!-- Per-session rows (shown when expanded) -->
+            <div id="offsetSess_${p.aid}" style="display:${isExpanded?'block':'none'};border-top:1px solid var(--border);padding:6px 10px 8px;">
+              <div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:6px">Select sessions to offset:</div>
+              ${(p.sessions||[]).sort(function(a,b){return new Date(a.date)-new Date(b.date);}).map(function(d){
+                const isChecked=!!(playerSel[d.sid]>0.005);
+                const curAmt=playerSel[d.sid]||0;
+                return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);opacity:${isChecked?'1':'0.6'}">
+                  <input type="checkbox" id="ofcb_${p.aid}_${d.sid}" ${isChecked?'checked':''}
+                    style="width:15px;height:15px;accent-color:var(--primary);cursor:pointer;flex-shrink:0"
+                    onchange="_offsetSessChange('${p.aid}','${d.sid}',${d.bal.toFixed(4)})"/>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:11px;font-weight:600;color:var(--text)">${d.label}</div>
+                    <div style="font-size:10px;color:var(--text3)">Balance: <span style="color:var(--orange)">${fmtMoney(d.bal)}</span></div>
+                  </div>
+                  <input type="number" id="ofamt_${p.aid}_${d.sid}"
+                    value="${isChecked?curAmt.toFixed(2):'0.00'}" min="0" max="${d.bal.toFixed(2)}" step="0.01" inputmode="decimal"
+                    ${isChecked?'':'disabled'}
+                    style="width:88px;text-align:right;background:var(--surface3);border:1px solid var(--border2);border-radius:var(--radius2);color:var(--text);font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;padding:4px 7px;outline:none"
+                    oninput="_offsetAmtChange('${p.aid}','${d.sid}')"/>
+                </div>`;
+              }).join('')}
+            </div>
           </div>`;
         }).join('')}
         ${eligiblePlayers.length===0?`<div class="empty" style="padding:16px"><div class="empty-text">No players with outstanding balance.</div></div>`:''}
       </div>
 
-      ${totalApplied>0&&remaining<0.01?`<div style="background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--green);margin-top:6px">✓ Full refund of ${fmtMoney(refundAmt)} is covered!</div>`:''}
-      ${remaining>0.005&&totalApplied>0?`<div style="background:var(--gold-dim);border:1px solid rgba(255,196,51,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--gold);margin-top:6px">⚠ ${fmtMoney(remaining)} still needs to be returned as cash to ${esc(payerName)}.</div>`:''}
+      <div id="offsetFullBanner" style="display:${applied>0&&remaining<0.01?'block':'none'};background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--green);margin-top:6px">✓ Full refund of ${fmtMoney(refundAmt)} is covered!</div>
+      <div id="offsetPartialBanner" style="display:${remaining>0.005&&applied>0?'block':'none'};background:var(--gold-dim);border:1px solid rgba(255,196,51,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--gold);margin-top:6px">⚠ <span class="offset-remaining-amt">${fmtMoney(Math.max(0,remaining))}</span> still needs to be returned as cash to ${esc(payerName)}.</div>
 
       <div class="modal-footer" style="margin-top:12px;padding-bottom:0">
         <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
-        <button class="btn btn-primary" ${totalApplied<0.01?'disabled':''} onclick="applyRefundOffset()">Apply Offset${totalApplied>0?' ('+fmtMoney(totalApplied)+')':''}</button>
+        <button id="offsetApplyBtn" class="btn btn-primary" ${applied<0.01?'disabled':''} onclick="applyRefundOffset()">Apply Offset${applied>0.01?' ('+fmtMoney(applied)+')':''}</button>
       </div>
     `;
   }
-
-  window.addOffsetPlayer = function(aid, maxRemaining){
-    const remaining = window._offsetRefundTotal - Object.values(window._offsetSelections).reduce((s,v)=>s+v,0);
-    if(remaining<0.01){ toast('Refund fully allocated','info'); return; }
-    const toApply = Math.min(remaining, maxRemaining);
-    window._offsetSelections[aid] = toApply;
-    renderOffsetModal();
-  };
-
-  window.removeOffsetPlayer = function(aid){
-    delete window._offsetSelections[aid];
-    renderOffsetModal();
-  };
 
   renderOffsetModal();
   openModal('payModal');
@@ -2573,17 +2658,20 @@ window.applyRefundOffset = async function(){
   const payerId=window._offsetPayerId;
   const payerName=window._offsetPayerName;
   const refundAmt=window._offsetRefundTotal;
-  const selections=window._offsetSelections||{};
+  const selections=window._offsetSelections||{}; // { aid: { sessId: amount } }
   const eligiblePlayers=window._offsetEligible||[];
 
-  if(!Object.keys(selections).length){ toast('Select at least one player to offset','error'); return; }
+  // Flatten to check anything was selected
+  let hasAny=false;
+  Object.values(selections).forEach(function(sessMap){
+    Object.values(sessMap).forEach(function(v){ if(v>0.005) hasAny=true; });
+  });
+  if(!hasAny){ toast('Select at least one session to offset','error'); return; }
 
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
 
-  // sessionUpdates: { sessionId -> payments[] } — collect all changes across sessions
   const sessionUpdates={};
-
-  const getSessionPayments = (ssid) => {
+  const getSessionPayments=function(ssid){
     if(!sessionUpdates[ssid]){
       const ss=STATE.sessions.find(x=>x.id===ssid);
       sessionUpdates[ssid]=[...(ss?.payments||[])];
@@ -2594,47 +2682,49 @@ window.applyRefundOffset = async function(){
   let totalApplied=0;
   const offsetSummaryParts=[];
 
-  for(const [targetId, offsetAmt] of Object.entries(selections)){
-    if(!offsetAmt||offsetAmt<0.01)continue;
+  for(const [targetId, sessMap] of Object.entries(selections)){
     const nm=(STATE.members.find(x=>x.id===targetId)||{}).name||'?';
-    // Get this player's session debts (oldest first by real date)
+    // Find this player's session debt objects to get owed amount for status calc
     const playerEntry=eligiblePlayers.find(p=>p.aid===targetId);
-    const sessionDebts=(playerEntry?.sessions||[]).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
-
-    let remainingOffset=offsetAmt;
     let playerApplied=0;
 
-    for(const debt of sessionDebts){
-      if(remainingOffset<=0.005) break;
-      const apply=Math.min(remainingOffset, debt.bal);
-      const pmts=getSessionPayments(debt.sid);
+    for(const [debtSid, offsetAmt] of Object.entries(sessMap)){
+      if(!offsetAmt||offsetAmt<0.01) continue;
+      const debtSession=STATE.sessions.find(x=>x.id===debtSid);if(!debtSession) continue;
+      const debtInfo=(playerEntry?.sessions||[]).find(d=>d.sid===debtSid);
+      const owed=debtInfo?debtInfo.owed:offsetAmt;
+
+      const pmts=getSessionPayments(debtSid);
       const idx=pmts.findIndex(p=>p.memberId===targetId);
       const curPaid=idx>=0?parseFloat(pmts[idx].amountPaid)||0:0;
+      const apply=Math.min(offsetAmt, debtInfo?debtInfo.bal:offsetAmt); // cap at actual balance
       const newPaid=curPaid+apply;
-      const newStatus=newPaid>=debt.owed-0.005?'paid':newPaid>0?'partial':'unpaid';
-      const entry={memberId:targetId,amountPaid:newPaid,status:newStatus,note:`Offset from ${payerName} refund (${fmtMoney(apply)})`,updatedAt:new Date().toISOString()};
+      const newStatus=newPaid>=owed-0.005?'paid':newPaid>0?'partial':'unpaid';
+      const entry={memberId:targetId,amountPaid:newPaid,status:newStatus,
+        note:'Offset from '+payerName+' refund ('+fmtMoney(apply)+')',
+        updatedAt:new Date().toISOString()};
       if(idx>=0)pmts[idx]=entry;else pmts.push(entry);
-      remainingOffset-=apply;
       playerApplied+=apply;
     }
 
     totalApplied+=playerApplied;
-    if(playerApplied>0.005) offsetSummaryParts.push(`${fmtMoney(playerApplied)} → ${nm}`);
+    if(playerApplied>0.005) offsetSummaryParts.push(fmtMoney(playerApplied)+' → '+nm);
   }
 
   // Mark payer's record in current session with cumulative refundApplied
   const currentPayments=getSessionPayments(sid);
-  const prevApplied=currentPayments.find(p=>p.memberId===payerId);
-  const prevRefundApplied=prevApplied?parseFloat(prevApplied.refundApplied)||0:0;
+  const prevAppliedRec=currentPayments.find(p=>p.memberId===payerId);
+  const prevRefundApplied=prevAppliedRec?parseFloat(prevAppliedRec.refundApplied)||0:0;
   const newRefundApplied=prevRefundApplied+totalApplied;
   const pidx=currentPayments.findIndex(p=>p.memberId===payerId);
-  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',refundApplied:newRefundApplied,note:`Refund offsets: ${offsetSummaryParts.join(', ')}`,updatedAt:new Date().toISOString()};
+  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',refundApplied:newRefundApplied,
+    note:'Refund offsets: '+offsetSummaryParts.join(', '),updatedAt:new Date().toISOString()};
   if(pidx>=0)currentPayments[pidx]=pentry;else currentPayments.push(pentry);
 
   try{
     await Promise.all(Object.entries(sessionUpdates).map(([ssid,pmts])=>updateDoc(doc(db,'sessions',ssid),{payments:pmts})));
     closeModal('payModal');
-    toast(`Offset applied to ${offsetSummaryParts.length} player(s)! ${fmtMoney(totalApplied)} total.`,'success');
+    toast('Offset applied: '+fmtMoney(totalApplied)+' across '+Object.keys(sessionUpdates).length+' session(s) for '+offsetSummaryParts.length+' player(s)!','success');
     loadChipinSession();
   }catch(e){ toast(e.message,'error'); }
 };
