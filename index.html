@@ -2663,8 +2663,11 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       const rem=refundAmt-applied;
       const defaultAmt=Math.min(maxBal, Math.max(0, rem));
       if((parseFloat(amtEl.value)||0)<=0.005) amtEl.value=defaultAmt.toFixed(2);
-      const proj=window._offsetProjectSelections[key]||{};
-      window._offsetProjectSelections[key]={...proj, amount:parseFloat(amtEl.value)||0};
+      // Parse pid and mid from key (format: 'pid__mid')
+      const sep=key.indexOf('__');
+      const pid=key.slice(0,sep);
+      const mid=key.slice(sep+2);
+      window._offsetProjectSelections[key]={pid, mid, amount:parseFloat(amtEl.value)||0};
     } else {
       amtEl.disabled=true; amtEl.closest('div').style.opacity='0.4'; amtEl.value='0.00';
       delete window._offsetProjectSelections[key];
@@ -2678,8 +2681,14 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
     let v=parseFloat(amtEl.value)||0;
     if(v>maxBal){ v=maxBal; amtEl.value=maxBal.toFixed(2); }
     if(v>0.005){
-      const proj=window._offsetProjectSelections[key]||{};
-      window._offsetProjectSelections[key]={...proj, amount:v};
+      const existing=window._offsetProjectSelections[key]||{};
+      // If pid/mid not yet set (edge case), parse from key
+      if(!existing.pid){
+        const sep=key.indexOf('__');
+        existing.pid=key.slice(0,sep);
+        existing.mid=key.slice(sep+2);
+      }
+      window._offsetProjectSelections[key]={...existing, amount:v};
     } else { delete window._offsetProjectSelections[key]; }
     _offsetUpdateTotals();
   };
@@ -2826,6 +2835,7 @@ window.applyRefundOffset = async function(){
   };
 
   let totalApplied=0;
+  let sessionApplied=0; // sessions only — used to update payer's refundApplied/creditOffsetApplied
   const offsetSummaryParts=[];
 
   for(const [targetId, sessMap] of Object.entries(selections)){
@@ -2854,6 +2864,7 @@ window.applyRefundOffset = async function(){
     }
 
     totalApplied+=playerApplied;
+    sessionApplied+=playerApplied;
     if(playerApplied>0.005) offsetSummaryParts.push(fmtMoney(playerApplied)+' → '+nm);
   }
 
@@ -2873,6 +2884,8 @@ window.applyRefundOffset = async function(){
     members[idx]={...members[idx], amountPaid:curPaid+apply, fixedAmount:due, updatedAt:new Date().toISOString()};
     const mname=(STATE.members.find(x=>x.id===pmid)||{}).name||'?';
     totalApplied+=apply;
+    // Note: project offsets also consume payer's credit — include in sessionApplied for tracking
+    sessionApplied+=apply;
     offsetSummaryParts.push(fmtMoney(apply)+' → '+mname+' (📋 '+esc(proj.name||'Project')+')');
   }
 
@@ -2880,14 +2893,13 @@ window.applyRefundOffset = async function(){
   const currentPayments=getSessionPayments(sid);
   const prevAppliedRec=currentPayments.find(p=>p.memberId===payerId);
   const prevRefundApplied=prevAppliedRec?parseFloat(prevAppliedRec.refundApplied)||0:0;
-  const newRefundApplied=prevRefundApplied+totalApplied;
+  const newRefundApplied=prevRefundApplied+sessionApplied;
   const pidx=currentPayments.findIndex(p=>p.memberId===payerId);
   const isOverpay=window._offsetIsOverpay;
   const isRemainingCredit=window._offsetIsRemainingCredit;
 
   let pentry;
   if(isOverpay && !isRemainingCredit){
-    // Cash overpayment: preserve amountPaid, track via refundApplied
     pentry={
       ...(prevAppliedRec||{memberId:payerId,amountPaid:0,status:'paid'}),
       memberId:payerId,
@@ -2896,17 +2908,15 @@ window.applyRefundOffset = async function(){
       updatedAt:new Date().toISOString()
     };
   } else if(isRemainingCredit){
-    // Carry-over credit offset: track via creditOffsetApplied on current session record
     const prevCreditOffset=prevAppliedRec?parseFloat(prevAppliedRec.creditOffsetApplied)||0:0;
     pentry={
       ...(prevAppliedRec||{memberId:payerId,amountPaid:0,status:'paid'}),
       memberId:payerId,
-      creditOffsetApplied:(prevCreditOffset+totalApplied),
+      creditOffsetApplied:(prevCreditOffset+sessionApplied),
       note:'Credit offsets: '+offsetSummaryParts.join(', '),
       updatedAt:new Date().toISOString()
     };
   } else {
-    // Expense refund: zero-cash record
     pentry={
       memberId:payerId,amountPaid:0,status:'refund-offset',
       refundApplied:newRefundApplied,
