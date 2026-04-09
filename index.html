@@ -921,6 +921,8 @@ function renderPage(page){
 function renderDashboard(el){
   const lastSession = STATE.sessions[0];
   const outstanding = gatherOutstanding();
+  const debtors = outstanding.filter(o=>o.balance>0.005);
+  const creditHolders = outstanding.filter(o=>o.creditBal>0.05&&o.balance<=0.005);
   el.innerHTML = `
     <div class="sec-header">
       <div><div class="sec-title">Dashboard</div><div class="sec-sub">🏸 Overview</div></div>
@@ -929,17 +931,22 @@ function renderDashboard(el){
     <div class="grid4" style="margin-bottom:14px">
       <div class="stat-card"><div class="stat-label">Members</div><div class="stat-val">${STATE.members.length}</div></div>
       <div class="stat-card"><div class="stat-label">Sessions</div><div class="stat-val">${STATE.sessions.length}</div></div>
-      <div class="stat-card"><div class="stat-label">Projects</div><div class="stat-val">${STATE.projects.length}</div></div>
-      <div class="stat-card"><div class="stat-label">Unpaid</div><div class="stat-val" style="color:var(--red)">${new Set(outstanding.map(o=>o.name)).size}</div></div>
+      <div class="stat-card"><div class="stat-label">Unpaid</div><div class="stat-val" style="color:var(--red)">${debtors.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Excess Credit</div><div class="stat-val" style="color:var(--green)">${creditHolders.length}</div></div>
     </div>
     <div class="card" style="margin-bottom:12px">
       <div class="card-title">🏸 Latest Session</div>
       ${lastSession ? renderLatestSessionCard(lastSession) : '<div class="empty" style="padding:16px"><div class="empty-text">No sessions yet.</div></div>'}
     </div>
-    <div class="card">
+    <div class="card" style="margin-bottom:12px">
       <div class="card-title">⚠️ Outstanding Balances</div>
-      ${renderOutstandingList(outstanding)}
+      ${renderOutstandingList(debtors)}
     </div>
+    ${creditHolders.length?`
+    <div class="card">
+      <div class="card-title">💚 Excess Credits — To Return or Offset</div>
+      ${renderCreditList(creditHolders)}
+    </div>`:''}
   `;
 }
 
@@ -963,7 +970,7 @@ function renderLatestSessionCard(s){
 
 function gatherOutstanding(){
   // Compute net balance per member across ALL sessions (respects carry-over credits)
-  // then add project balances. Members with net credit are excluded.
+  // Positive netBal = owes money. Negative netBal = has unallocated excess credit.
   const memberNames={};
   STATE.members.forEach(m=>{ memberNames[m.id]=m.name; });
 
@@ -992,24 +999,37 @@ function gatherOutstanding(){
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
       const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
+      const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
       const netRefund=expPaid-myShare;
       let delta;
       if(netRefund>0){
         // Expense payer: unrecovered refund = credit for them
         delta=-Math.max(0,netRefund-refundApplied);
       } else {
-        delta=Math.max(0,myShare-expPaid)-paid;
+        // Normal player: owed - paid (negative = overpayment credit)
+        const rawDelta=Math.max(0,myShare-expPaid)-paid;
+        const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
+        // Reduce credit by cash overpay already offset (refundApplied) AND carry-over credit already offset (creditOffsetApplied)
+        const netCredit=Math.max(0,overpayCredit-refundApplied);
+        delta=rawDelta<0?-netCredit:rawDelta;
+        // Also subtract carry-over credit offset applied in this session
+        if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
       }
       sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
     });
   });
 
   const memberTotals={};
+  // Collect both debtors (netBal > 0) and excess credit holders (netBal < -0.05)
   Object.entries(sessionNetBal).forEach(([aid,netBal])=>{
+    const nm=memberNames[aid]||'?';
     if(netBal>0.005){
-      const nm=memberNames[aid]||'?';
-      if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0};
+      if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
       memberTotals[aid].sessionBal=netBal;
+    } else if(netBal<-0.05){
+      // Has unallocated excess credit
+      if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
+      memberTotals[aid].creditBal=Math.abs(netBal);
     }
   });
 
@@ -1020,7 +1040,7 @@ function gatherOutstanding(){
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       if(bal>0.005){
-        if(!memberTotals[pm.memberId]) memberTotals[pm.memberId]={name:nm,sessionBal:0,projectBal:0};
+        if(!memberTotals[pm.memberId]) memberTotals[pm.memberId]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
         memberTotals[pm.memberId].projectBal+=bal;
       }
     });
@@ -1028,9 +1048,9 @@ function gatherOutstanding(){
 
   return Object.entries(memberTotals).map(([id,d])=>({
     memberId:id, name:d.name,
-    sessionBal:d.sessionBal, projectBal:d.projectBal,
+    sessionBal:d.sessionBal, projectBal:d.projectBal, creditBal:d.creditBal||0,
     balance:d.sessionBal+d.projectBal
-  })).filter(o=>o.balance>0.005).sort((a,b)=>b.balance-a.balance);
+  })).filter(o=>o.balance>0.005||o.creditBal>0.05).sort((a,b)=>(b.balance+b.creditBal)-(a.balance+a.creditBal));
 }
 
 function renderOutstandingList(list){
@@ -1050,6 +1070,25 @@ function renderOutstandingList(list){
         </div>
       </div>
       <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:14px;font-weight:700;flex-shrink:0">${fmtMoney(o.balance)}</span>
+    </div>
+  `).join('');
+}
+
+function renderCreditList(list){
+  if(!list.length) return '';
+  return list.map(o=>`
+    <div class="chipin-row" style="margin-bottom:5px;cursor:pointer;border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)" onclick="showOutstandingBreakdown('${o.memberId}','${esc(o.name)}')">
+      <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+        <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(o.name)}22;color:${avatarColor(o.name)}">${initials(o.name)}</div>
+        <div style="min-width:0">
+          <div style="font-size:12px;font-weight:600;color:var(--green)">${esc(o.name)}</div>
+          <div style="font-size:10px;color:var(--text3)">
+            💚 Unallocated excess credit · <span style="color:var(--green)">${fmtMoney(o.creditBal)} to return or offset</span>
+            <span style="color:var(--text3);margin-left:4px">· tap for details</span>
+          </div>
+        </div>
+      </div>
+      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--green);font-size:14px;font-weight:700;flex-shrink:0">↩ ${fmtMoney(o.creditBal)}</span>
     </div>
   `).join('');
 }
@@ -1085,7 +1124,11 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     if(netRefund>0){
       delta=-Math.max(0,netRefund-refundApplied); // credit (negative)
     } else {
-      delta=Math.max(0,myShare-expPaid)-paid; // debt (positive)
+      // Normal player delta — negative means overpayment credit
+      const rawDelta=Math.max(0,myShare-expPaid)-paid;
+      const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
+      const netCredit=Math.max(0,overpayCredit-refundApplied);
+      delta=rawDelta<0?-netCredit:rawDelta;
     }
     sessionNetBal+=delta;
     const owed=Math.max(0,myShare-expPaid);
@@ -1159,10 +1202,15 @@ window.showOutstandingBreakdown = function(memberId, memberName){
         </div>
       `).join('')}
     `:''}
+    ${grandTotal>0.005?`
     <div style="margin-top:14px;background:var(--red-dim);border:1px solid rgba(255,68,102,0.25);border-radius:var(--radius2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Total Outstanding</span>
       <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--red)">${fmtMoney(grandTotal)}</span>
-    </div>
+    </div>`:`
+    <div style="margin-top:14px;background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-family:'Barlow Condensed',sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--text2)">Net Excess Credit</span>
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--green)">↩ ${fmtMoney(Math.max(0,sessionNetBal<0?Math.abs(sessionNetBal)-projectTotal:0))}</span>
+    </div>`}
   `;
   openModal('detailModal');
 };
@@ -2252,11 +2300,18 @@ function renderChipinBody(s){
         const unrecoveredRefund=Math.max(0,prevNetRefund-prevRefundApplied);
         carry -= unrecoveredRefund; // credit — reduces what they owe in future sessions
       } else {
-        // Normal player — carry over any unpaid balance
-        // Clamp to zero: if they overpaid in a single session (e.g. via refund offset),
-        // that does NOT generate a credit for future sessions — it just clears the debt.
-        const sessionBal = prevOwed - ppaid;
-        carry += Math.max(0, sessionBal);
+        // Normal player — carry over any unpaid balance OR overpayment credit
+        // ppaid > prevOwed means they overpaid — that excess is a credit for future sessions
+        const sessionBal = prevOwed - ppaid; // negative = overpayment credit, positive = debt
+        if(sessionBal < -0.005){
+          // Overpayment: credit carries forward, reduced by any portion already offset to others
+          const overpayCredit=Math.abs(sessionBal);
+          const alreadyOffset=prevRefundApplied; // how much was offset via ⚙ Offset
+          carry -= Math.max(0, overpayCredit - alreadyOffset);
+        } else {
+          // Normal debt or zero — only carry forward positive balances
+          carry += Math.max(0, sessionBal);
+        }
       }
     });
     return carry; // negative = credit, positive = debt
@@ -2289,7 +2344,10 @@ function renderChipinBody(s){
     // carryover can be negative (credit from prev session) → reduces what they owe
     const rawOwed = myShare + carryover - expPaid; // can be negative if credit > current cost
     const totalOwed = Math.max(0, rawOwed);
-    const remainingCredit = rawOwed < 0 ? Math.abs(rawOwed) : 0; // leftover credit after covering this session
+    // remainingCredit: leftover carry-over credit after covering this session, minus any already offset to others
+    const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
+    const rawRemainingCredit = rawOwed < 0 ? Math.abs(rawOwed) : 0;
+    const remainingCredit = Math.max(0, rawRemainingCredit - creditOffsetApplied);
     const bal=Math.max(0,totalOwed-paid);
 
     // For expense payers: their effective refund grows if they have a carry-over credit,
@@ -2304,7 +2362,16 @@ function renderChipinBody(s){
     else if(paid>0) status='partial';
     else status='unpaid';
 
-    return {aid,nm,m,paid,bal,status,perHead:myShare,carryover,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer};
+    // Overpayment: player paid MORE than they owed — excess is a credit they can offset to others
+    // Threshold 0.05 filters floating-point rounding noise (e.g. AED 0.01 differences)
+    const payRec=payments.find(p=>p.memberId===aid);
+    const overpaymentApplied=payRec?parseFloat(payRec.refundApplied)||0:0;
+    const rawOverpay=paid-totalOwed; // positive = paid too much
+    const overpayment=rawOverpay>0.05?rawOverpay:0; // ignore sub-5-fils rounding noise
+    const overpaymentAvail=Math.max(0,overpayment-overpaymentApplied);
+    const hasOverpayment=overpayment>0.05;
+
+    return {aid,nm,m,paid,bal,status,perHead:myShare,carryover,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer,overpayment,overpaymentAvail,overpaymentApplied,hasOverpayment};
   });
   // Compute normalOwed from ALL rows (before member filtering) — carry-over-adjusted
   // Credit-covered players (totalOwed=0) correctly contribute 0, fixing false "Remaining"
@@ -2384,7 +2451,7 @@ function renderChipinBody(s){
           const carryDebt=Math.max(0,r.carryover);
           const carryCredit=Math.max(0,-r.carryover);
           return `
-          <div class="chipin-row ${r.status}" style="${r.remainingCredit>0.005?'border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)':''}">
+          <div class="chipin-row ${r.status}" style="${r.remainingCredit>0.005?'border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)':r.hasOverpayment&&r.overpaymentAvail>0.005?'border-color:rgba(0,212,255,0.3);background:rgba(0,212,255,0.04)':''}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
               <div class="m-avatar" style="width:28px;height:28px;font-size:10px;background:${avatarColor(r.nm)}22;color:${avatarColor(r.nm)}">${initials(r.nm)}</div>
               <div style="min-width:0">
@@ -2398,17 +2465,27 @@ function renderChipinBody(s){
                   ${carryCredit>0.005&&r.remainingCredit<=0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
                   ${r.remainingCredit<=0.005?` · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>`:''}
                 </div>
+                ${r.hasOverpayment?`<div style="font-size:10px;margin-top:3px">
+                  <span style="color:var(--primary)">↑ Overpaid by ${fmtMoney(r.overpayment)}</span>
+                  ${r.overpaymentApplied>0.005?` · Offset applied: ${fmtMoney(r.overpaymentApplied)}`:''}
+                  ${r.overpaymentAvail>0.005?` · <span style="color:var(--gold)">${fmtMoney(r.overpaymentAvail)} available to offset</span>`:' · <span style="color:var(--green)">Fully offset ✓</span>'}
+                </div>`:''}
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
               ${r.remainingCredit>0.005
                 ? `<span class="badge badge-green" style="font-size:9px">↩ ${fmtMoney(r.remainingCredit)}</span>`
-                : r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'
+                : r.hasOverpayment&&r.overpaymentAvail<=0.05
+                  ? '<span class="badge badge-green">Paid</span>'
+                  : r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'
               }
+              ${r.hasOverpayment&&r.overpaymentAvail>0.05?`<span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(r.overpaymentAvail)}</span>`:''}
               ${(canAdmin()||(isMember&&r.aid===myId))&&r.remainingCredit<=0.005?`
                 ${r.status!=='paid'?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
                 ${canAdmin()?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" title="Edit amount paid" onclick="openEditPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">✏️</button>`:''}
               `:''}
+              ${canAdmin()&&r.hasOverpayment&&r.overpaymentAvail>0.05?`<button class="btn btn-ghost btn-xs" onclick="openOverpayOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.overpaymentAvail},false)">⚙ Offset</button>`:''}
+              ${canAdmin()&&r.remainingCredit>0.05?`<button class="btn btn-ghost btn-xs" onclick="openOverpayOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.remainingCredit},true)">⚙ Offset</button>`:''}
             </div>
           </div>`;
         }).join('')}
@@ -2465,8 +2542,26 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   const eligiblePlayers = Object.values(memberDebts).sort((a,b)=>b.totalBal-a.totalBal)
     .map(d=>({...d, remaining:d.totalBal}));
 
+  // Collect projects where OTHER members have outstanding balances (payer can offset credit here too)
+  const eligibleProjects = []; // [{pid, pname, mid, mname, due, paid, bal}]
+  STATE.projects.forEach(function(p){
+    (p.members||[]).forEach(function(pm){
+      if(pm.memberId===payerId) return; // skip payer's own project membership
+      const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
+      const paid=parseFloat(pm.amountPaid)||0;
+      const bal=due-paid;
+      if(bal>0.005){
+        const m=STATE.members.find(function(x){return x.id===pm.memberId;});
+        eligibleProjects.push({pid:p.id, pname:p.name||'Project', mid:pm.memberId, mname:m?m.name:'?', due, paid, bal});
+      }
+    });
+  });
+  // Sort by project name then member name
+  eligibleProjects.sort(function(a,b){ return (a.pname+a.mname).localeCompare(b.pname+b.mname); });
+
   // _offsetSelections: { aid: { sessionId: amount } } — per-session granular selections
   window._offsetSelections = {};
+  window._offsetProjectSelections = {}; // { 'pid__mid': { pid, mid, amount, due, bal, pname, mname } }
   window._offsetRefundTotal = refundAmt;
   window._offsetPayerId = payerId;
   window._offsetPayerName = payerName;
@@ -2482,6 +2577,9 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
     let t=0;
     Object.values(window._offsetSelections).forEach(function(sessMap){
       Object.values(sessMap).forEach(function(v){ t+=v; });
+    });
+    Object.values(window._offsetProjectSelections||{}).forEach(function(proj){
+      t+=proj.amount||0;
     });
     return t;
   }
@@ -2553,6 +2651,37 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       sessBlock.style.display='none';
       if(expandBtn) expandBtn.textContent='▼ Sessions';
     }
+  };
+
+  window._offsetProjChange = function(key, maxBal){
+    const cb=document.getElementById('ofpcb_'+key);
+    const amtEl=document.getElementById('ofpamt_'+key);
+    if(!cb||!amtEl) return;
+    if(cb.checked){
+      amtEl.disabled=false; amtEl.closest('div').style.opacity='1';
+      const applied=_offsetTotalApplied();
+      const rem=refundAmt-applied;
+      const defaultAmt=Math.min(maxBal, Math.max(0, rem));
+      if((parseFloat(amtEl.value)||0)<=0.005) amtEl.value=defaultAmt.toFixed(2);
+      const proj=window._offsetProjectSelections[key]||{};
+      window._offsetProjectSelections[key]={...proj, amount:parseFloat(amtEl.value)||0};
+    } else {
+      amtEl.disabled=true; amtEl.closest('div').style.opacity='0.4'; amtEl.value='0.00';
+      delete window._offsetProjectSelections[key];
+    }
+    _offsetUpdateTotals();
+  };
+
+  window._offsetProjAmtChange = function(key, maxBal){
+    const amtEl=document.getElementById('ofpamt_'+key);
+    if(!amtEl) return;
+    let v=parseFloat(amtEl.value)||0;
+    if(v>maxBal){ v=maxBal; amtEl.value=maxBal.toFixed(2); }
+    if(v>0.005){
+      const proj=window._offsetProjectSelections[key]||{};
+      window._offsetProjectSelections[key]={...proj, amount:v};
+    } else { delete window._offsetProjectSelections[key]; }
+    _offsetUpdateTotals();
   };
 
   function renderOffsetModal(){
@@ -2633,6 +2762,31 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       <div id="offsetFullBanner" style="display:${applied>0&&remaining<0.01?'block':'none'};background:var(--green-dim);border:1px solid rgba(0,232,153,0.25);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--green);margin-top:6px">✓ Full refund of ${fmtMoney(refundAmt)} is covered!</div>
       <div id="offsetPartialBanner" style="display:${remaining>0.005&&applied>0?'block':'none'};background:var(--gold-dim);border:1px solid rgba(255,196,51,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:12px;color:var(--gold);margin-top:6px">⚠ <span class="offset-remaining-amt">${fmtMoney(Math.max(0,remaining))}</span> still needs to be returned as cash to ${esc(payerName)}.</div>
 
+      ${eligibleProjects.length?`
+      <!-- Project offset section -->
+      <div style="font-family:'Barlow Condensed',sans-serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);margin:14px 0 8px;padding-bottom:5px;border-bottom:1px solid rgba(255,196,51,0.25)">📋 Also Offset to Projects</div>
+      ${eligibleProjects.map(function(proj){
+        const key=proj.pid+'__'+proj.mid;
+        const sel=window._offsetProjectSelections[key];
+        const isChecked=!!(sel&&sel.amount>0.005);
+        const curAmt=sel?sel.amount:0;
+        return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface2);border:1px solid ${isChecked?'rgba(255,196,51,0.35)':'var(--border)'};border-radius:var(--radius2);margin-bottom:5px;opacity:${isChecked?'1':'0.75'}">
+          <input type="checkbox" id="ofpcb_${key}" ${isChecked?'checked':''}
+            style="width:15px;height:15px;accent-color:var(--gold);cursor:pointer;flex-shrink:0"
+            onchange="_offsetProjChange('${key}',${proj.bal.toFixed(4)})"/>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:600;color:var(--gold)">📋 ${esc(proj.pname)}</div>
+            <div style="font-size:10px;color:var(--text3)">${esc(proj.mname)} · Balance: <span style="color:var(--orange)">${fmtMoney(proj.bal)}</span></div>
+          </div>
+          <input type="number" id="ofpamt_${key}"
+            value="${isChecked?curAmt.toFixed(2):'0.00'}" min="0" max="${proj.bal.toFixed(2)}" step="0.01" inputmode="decimal"
+            ${isChecked?'':'disabled'}
+            style="width:88px;text-align:right;background:var(--surface3);border:1px solid var(--border2);border-radius:var(--radius2);color:var(--text);font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;padding:4px 7px;outline:none"
+            oninput="_offsetProjAmtChange('${key}',${proj.bal.toFixed(4)})"/>
+        </div>`;
+      }).join('')}
+      `:''}
+
       <div class="modal-footer" style="margin-top:12px;padding-bottom:0">
         <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
         <button id="offsetApplyBtn" class="btn btn-primary" ${applied<0.01?'disabled':''} onclick="applyRefundOffset()">Apply Offset${applied>0.01?' ('+fmtMoney(applied)+')':''}</button>
@@ -2657,7 +2811,8 @@ window.applyRefundOffset = async function(){
   Object.values(selections).forEach(function(sessMap){
     Object.values(sessMap).forEach(function(v){ if(v>0.005) hasAny=true; });
   });
-  if(!hasAny){ toast('Select at least one session to offset','error'); return; }
+  Object.values(window._offsetProjectSelections||{}).forEach(function(proj){ if(proj.amount>0.005) hasAny=true; });
+  if(!hasAny){ toast('Select at least one session or project to offset','error'); return; }
 
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
 
@@ -2702,25 +2857,90 @@ window.applyRefundOffset = async function(){
     if(playerApplied>0.005) offsetSummaryParts.push(fmtMoney(playerApplied)+' → '+nm);
   }
 
-  // Mark payer's record in current session with cumulative refundApplied
+  // ---- Process project offsets ----
+  const projectUpdates={}; // pid -> members[]
+  for(const [key, projSel] of Object.entries(window._offsetProjectSelections||{})){
+    if(!projSel.amount||projSel.amount<0.01) continue;
+    const {pid, mid:pmid, amount:offsetAmt} = projSel;
+    const proj=STATE.projects.find(x=>x.id===pid); if(!proj) continue;
+    if(!projectUpdates[pid]) projectUpdates[pid]=[...(proj.members||[])];
+    const members=projectUpdates[pid];
+    const idx=members.findIndex(m=>m.memberId===pmid);
+    if(idx<0) continue;
+    const due=parseFloat(members[idx].fixedAmount||proj.fixedAmount)||0;
+    const curPaid=parseFloat(members[idx].amountPaid)||0;
+    const apply=Math.min(offsetAmt, Math.max(0,due-curPaid));
+    members[idx]={...members[idx], amountPaid:curPaid+apply, fixedAmount:due, updatedAt:new Date().toISOString()};
+    const mname=(STATE.members.find(x=>x.id===pmid)||{}).name||'?';
+    totalApplied+=apply;
+    offsetSummaryParts.push(fmtMoney(apply)+' → '+mname+' (📋 '+esc(proj.name||'Project')+')');
+  }
+
+  // Mark payer's record — works for both expense refund and overpayment/credit
   const currentPayments=getSessionPayments(sid);
   const prevAppliedRec=currentPayments.find(p=>p.memberId===payerId);
   const prevRefundApplied=prevAppliedRec?parseFloat(prevAppliedRec.refundApplied)||0:0;
   const newRefundApplied=prevRefundApplied+totalApplied;
   const pidx=currentPayments.findIndex(p=>p.memberId===payerId);
-  const pentry={memberId:payerId,amountPaid:0,status:'refund-offset',refundApplied:newRefundApplied,
-    note:'Refund offsets: '+offsetSummaryParts.join(', '),updatedAt:new Date().toISOString()};
+  const isOverpay=window._offsetIsOverpay;
+  const isRemainingCredit=window._offsetIsRemainingCredit;
+
+  let pentry;
+  if(isOverpay && !isRemainingCredit){
+    // Cash overpayment: preserve amountPaid, track via refundApplied
+    pentry={
+      ...(prevAppliedRec||{memberId:payerId,amountPaid:0,status:'paid'}),
+      memberId:payerId,
+      refundApplied:newRefundApplied,
+      note:'Overpay offsets: '+offsetSummaryParts.join(', '),
+      updatedAt:new Date().toISOString()
+    };
+  } else if(isRemainingCredit){
+    // Carry-over credit offset: track via creditOffsetApplied on current session record
+    const prevCreditOffset=prevAppliedRec?parseFloat(prevAppliedRec.creditOffsetApplied)||0:0;
+    pentry={
+      ...(prevAppliedRec||{memberId:payerId,amountPaid:0,status:'paid'}),
+      memberId:payerId,
+      creditOffsetApplied:(prevCreditOffset+totalApplied),
+      note:'Credit offsets: '+offsetSummaryParts.join(', '),
+      updatedAt:new Date().toISOString()
+    };
+  } else {
+    // Expense refund: zero-cash record
+    pentry={
+      memberId:payerId,amountPaid:0,status:'refund-offset',
+      refundApplied:newRefundApplied,
+      note:'Refund offsets: '+offsetSummaryParts.join(', '),
+      updatedAt:new Date().toISOString()
+    };
+  }
   if(pidx>=0)currentPayments[pidx]=pentry;else currentPayments.push(pentry);
+  window._offsetIsOverpay=false;
+  window._offsetIsRemainingCredit=false;
+  window._offsetProjectSelections={};
 
   try{
-    await Promise.all(Object.entries(sessionUpdates).map(([ssid,pmts])=>updateDoc(doc(db,'sessions',ssid),{payments:pmts})));
+    const writes=Object.entries(sessionUpdates).map(([ssid,pmts])=>updateDoc(doc(db,'sessions',ssid),{payments:pmts}));
+    Object.entries(projectUpdates).forEach(([pid,members])=>writes.push(updateDoc(doc(db,'projects',pid),{members})));
+    await Promise.all(writes);
     closeModal('payModal');
-    toast('Offset applied: '+fmtMoney(totalApplied)+' across '+Object.keys(sessionUpdates).length+' session(s) for '+offsetSummaryParts.length+' player(s)!','success');
+    toast('Offset applied: '+fmtMoney(totalApplied)+' across '+(Object.keys(sessionUpdates).length+Object.keys(projectUpdates).length)+' record(s)!','success');
     loadChipinSession();
   }catch(e){ toast(e.message,'error'); }
 };
 
-// ============ AUTO-SETTLE CARRY-OVER DEBT FROM EXPENSE PAYER REFUND ============
+// ============ OVERPAYMENT OFFSET ============
+window.openOverpayOffsetModal = function(sid, payerId, payerName, overpayAmt, isRemainingCredit){
+  window._offsetIsOverpay = true;
+  window._offsetIsRemainingCredit = !!isRemainingCredit;
+  openRefundOffsetModal(sid, payerId, payerName, overpayAmt);
+  setTimeout(function(){
+    const titleEl=document.querySelector('#payModalBody .modal-title');
+    if(titleEl) titleEl.textContent=isRemainingCredit?'⚙ Offset Carry-Over Credit':'⚙ Offset Overpayment';
+    const descEl=document.querySelector('#payModalBody .modal-header + div');
+    if(descEl) descEl.innerHTML='<strong>'+esc(payerName)+'</strong> has '+(isRemainingCredit?'carry-over credit':'overpaid') +' of <span style="color:var(--primary);font-weight:700">'+fmtMoney(overpayAmt)+'</span>. Apply to reduce other players\' balances.';
+  }, 0);
+};
 window.autoSettleCarryOver = async function(sid, payerId, payerName, carryDebt){
   if(!confirm(`Deduct ${payerName}'s carry-over debt (${fmtMoney(carryDebt)}) from their refund and mark previous session(s) as paid?`)) return;
 
@@ -2815,11 +3035,17 @@ window.manualSetPerHead = async function(sid){
 // ---- helpers used by pay modal ----
 function _buildPayDebts(mid){
   const allSessionDebts=[];
+  // Process oldest-first so carry-over credits flow forward correctly
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  // Rolling credit carried forward from previous sessions (negative = credit, positive = debt)
+  let rollingCarry=0;
+
   sortedSessions.forEach(s=>{
     const sAtt=s.attendees||[];
-    if(!sAtt.includes(mid))return;
     const sExp=s.expenses||[];
+
+    // Compute this member's share for this session
     const sMyShare=(()=>{
       if(!sExp.length)return parseFloat(s.perHead)||0;
       const fs=sExp.reduce((sum,e)=>{
@@ -2830,16 +3056,57 @@ function _buildPayDebts(mid){
       },0);
       return fs>0?fs:(parseFloat(s.perHead)||0);
     })();
-    if(!sMyShare)return;
+
+    if(!sAtt.includes(mid)){
+      // Not in this session — carry doesn't change
+      return;
+    }
+
     const sExpPayer={};
     sExp.forEach(e=>{if(e.paidBy)sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0);});
     const sExpPaid=sExpPayer[mid]||0;
-    if(sExpPaid-sMyShare>0)return; // net expense payer — skip
     const sPay=(s.payments||[]).find(p=>p.memberId===mid);
     const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
+    const sRefundApplied=sPay?parseFloat(sPay.refundApplied)||0:0;
+
+    const netRefund=sExpPaid-sMyShare;
+
+    if(netRefund>0){
+      // Expense payer in this session — update rolling carry with their unrecovered refund
+      const unrecovered=Math.max(0,netRefund-sRefundApplied);
+      rollingCarry-=unrecovered; // credit (reduces future debts)
+      return; // expense payers don't owe cash
+    }
+
+    // Normal player: rawOwed = share + carry (positive=debt, negative=credit from prev)
+    if(!sMyShare)return;
     const sOwed=Math.max(0,sMyShare-sExpPaid);
-    const sBal=sOwed-sPaid;
-    if(sBal>0.005)allSessionDebts.push({sid:s.id,label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),owed:sOwed,paid:sPaid,bal:sBal});
+    const rawOwed=sOwed+rollingCarry; // rollingCarry negative = credit reduces this
+    const effectiveOwed=Math.max(0,rawOwed);
+    const leftoverCredit=rawOwed<0?Math.abs(rawOwed):0;
+
+    // Cash still needed = effectiveOwed - what they already paid
+    const sBal=effectiveOwed-sPaid;
+
+    if(sBal>0.005){
+      // Still has a real cash balance due
+      allSessionDebts.push({
+        sid:s.id,
+        label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),
+        owed:effectiveOwed,
+        paid:sPaid,
+        bal:sBal
+      });
+      // Update rolling carry: any unpaid balance carries forward as debt
+      const settledThisSession=Math.min(sPaid, effectiveOwed);
+      rollingCarry=rawOwed-settledThisSession; // remaining after payment
+    } else {
+      // Fully settled (by cash or credit) — update rolling carry
+      // If credit covered it, remaining credit carries forward
+      // Subtract any credit already offset to others via creditOffsetApplied
+      const sCreditOffsetApplied=sPay?parseFloat(sPay.creditOffsetApplied)||0:0;
+      rollingCarry=rawOwed-sPaid+sCreditOffsetApplied; // reduce credit by what was already offset
+    }
   });
   return allSessionDebts;
 }
@@ -2989,8 +3256,10 @@ window.saveEditPayment = async function(sid,mid,totalOwed){
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const payments=[...(s.payments||[])];
   const idx=payments.findIndex(p=>p.memberId===mid);
+  const existing=idx>=0?payments[idx]:{};
   const newStatus=newAmt>=totalOwed-0.005?'paid':newAmt>0?'partial':'unpaid';
-  const entry={memberId:mid,amountPaid:newAmt,status:newStatus,note,updatedAt:new Date().toISOString()};
+  // Preserve refundApplied so overpayment/expense-refund offset tracking is not lost
+  const entry={...existing,memberId:mid,amountPaid:newAmt,status:newStatus,note,updatedAt:new Date().toISOString()};
   if(idx>=0)payments[idx]=entry;else payments.push(entry);
   try{
     await updateDoc(doc(db,'sessions',sid),{payments});
