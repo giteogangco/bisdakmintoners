@@ -576,7 +576,7 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
     <div class="modal-handle"></div>
     <div class="modal-header">
       <div class="modal-title" id="expModalTitle">Log Expense</div>
-      <button class="modal-close" onclick="closeModal('expenseModal')">✕</button>
+      <button class="modal-close" onclick="STATE.editingExpenseId=null;closeModal('expenseModal')">✕</button>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Category</label>
@@ -610,7 +610,7 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:14px 0}
       <div id="efPlayers" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeModal('expenseModal')">Cancel</button>
+      <button class="btn btn-ghost" onclick="STATE.editingExpenseId=null;closeModal('expenseModal')">Cancel</button>
       <button class="btn btn-primary" onclick="saveExpense()">Save</button>
     </div>
   </div>
@@ -1534,11 +1534,21 @@ window.saveLatePlayers = async function(){
   if(!newIds.length){ closeModal('latePlayerModal'); return; }
   const att = [...(s.attendees||[]), ...newIds];
   const queue = [...(s.queueOrder||s.attendees||[]), ...newIds];
-  const payments = [...(s.payments||[]), ...newIds.map(id=>({memberId:id,amountPaid:0,status:'unpaid'}))];
+  // Only add a payment stub if not already present — avoid overwriting existing records
+  const existingPayments = [...(s.payments||[])];
+  newIds.forEach(function(id){
+    if(!existingPayments.find(function(p){return p.memberId===id;})){
+      existingPayments.push({memberId:id,amountPaid:0,status:'unpaid'});
+    }
+  });
+  // Recalculate perHead: if expenses exist, spread over new att count
+  const expenses = s.expenses||[];
+  const expTotal = expenses.reduce(function(sum,e){return sum+(parseFloat(e.amount)||0);},0);
+  const perHead = att.length>0 && expTotal>0 ? Math.round((expTotal/att.length)*100)/100 : (parseFloat(s.perHead)||0);
   try{
-    await updateDoc(doc(db,'sessions',sid),{attendees:att,queueOrder:queue,payments});
+    await updateDoc(doc(db,'sessions',sid),{attendees:att,queueOrder:queue,payments:existingPayments,perHead:perHead});
     closeModal('latePlayerModal');
-    toast(`${newIds.length} player(s) added to queue!`,'success');
+    toast(newIds.length+' player(s) added to queue!','success');
   }catch(e){ toast(e.message,'error'); }
 };
 
@@ -1934,12 +1944,7 @@ window.deleteMatch = async function(sid, matchId){
 
   // Re-number remaining matches sequentially to avoid gaps
   let matchNum=1;
-  const renumbered=newMatches.map(m=>{
-    if(m.result||(!m.scheduled&&!m.result)){
-      return {...m, matchNum:matchNum++};
-    }
-    return {...m, matchNum:matchNum++};
-  });
+  const renumbered=newMatches.map(function(m){ return {...m, matchNum:matchNum++}; });
 
   try{
     await updateDoc(doc(db,'sessions',sid),{matches:renumbered, queueOrder:queue});
@@ -2182,7 +2187,30 @@ function renderChipinBody(s){
   const autoPerHead = att.length>0 ? totalExpenses/att.length : 0;
   const perHead = parseFloat(s.perHead)||autoPerHead;
   const payments=s.payments||[];
-  const totalCollected=payments.reduce((sum,p)=>sum+(parseFloat(p.amountPaid)||0),0);
+  // totalCollected = only cash payments from normal players (not expense payer refund records)
+  const totalCollected=payments.reduce((sum,p)=>{
+    if(p.status==='refund-offset') return sum; // expense payer offset, no cash in
+    return sum+(parseFloat(p.amountPaid)||0);
+  },0);
+  // totalTarget = sum of what normal players owe (excluding expense payers with net refunds)
+  const expPayerTotalsForStat={};
+  expenses.forEach(e=>{ if(e.paidBy) expPayerTotalsForStat[e.paidBy]=(expPayerTotalsForStat[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+  const normalOwed=att.reduce((sum,aid)=>{
+    const myShare=(()=>{
+      if(!expenses.length) return perHead;
+      const fs=expenses.reduce((s2,e)=>{
+        const amt=parseFloat(e.amount)||0;if(!amt)return s2;
+        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+        if(!incl.includes(aid))return s2;
+        return s2+Math.round((amt/incl.length)*100)/100;
+      },0);
+      return fs>0?fs:perHead;
+    })();
+    const expPaid=expPayerTotalsForStat[aid]||0;
+    const netRef=expPaid-myShare;
+    if(netRef>0) return sum; // expense payer — owes nothing
+    return sum+Math.max(0,myShare-expPaid);
+  },0);
   const isMember=STATE.role==='member';
   const myId=STATE.memberDoc?.id;
 
@@ -2306,9 +2334,9 @@ function renderChipinBody(s){
           ${totalExpenses>0?`<div class="stat-sub">From ${fmtMoney(totalExpenses)} expenses</div>`:''}
         </div>
         <div class="stat-card"><div class="stat-label">Collected</div><div class="stat-val" style="font-size:20px;color:var(--green)">${fmtMoney(totalCollected)}</div></div>
-        <div class="stat-card"><div class="stat-label">Remaining</div><div class="stat-val" style="font-size:20px;color:var(--red)">${fmtMoney(Math.max(0,perHead*att.length-totalCollected))}</div></div>
+        <div class="stat-card"><div class="stat-label">Remaining</div><div class="stat-val" style="font-size:20px;color:var(--red)">${fmtMoney(Math.max(0,normalOwed-totalCollected))}</div></div>
       </div>
-      ${perHead>0?`<div class="progress" style="margin-bottom:14px"><div class="progress-fill" style="width:${Math.min(100,perHead*att.length>0?totalCollected/(perHead*att.length)*100:0)}%;background:var(--green)"></div></div>`:''}
+      ${perHead>0?`<div class="progress" style="margin-bottom:14px"><div class="progress-fill" style="width:${Math.min(100,normalOwed>0?totalCollected/normalOwed*100:0)}%;background:var(--green)"></div></div>`:''}
       ${!perHead?`<div class="alert alert-warn">No per-head amount yet. Log expenses to auto-calculate, or <button class="btn btn-ghost btn-xs" onclick="manualSetPerHead('${s.id}')">set manually</button>.</div>`:''}
 
       ${expPayerRows.length?`
@@ -2387,10 +2415,9 @@ function renderChipinBody(s){
                 : r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'
               }
               ${(canAdmin()||(isMember&&r.aid===myId))&&r.remainingCredit<=0.005?`
-                <button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>
-                ${r.paid>0&&canAdmin()?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" title="Edit amount paid" onclick="openEditPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">✏️</button>`:''}
+                ${r.status!=='paid'?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
+                ${canAdmin()?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" title="Edit amount paid" onclick="openEditPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">✏️</button>`:''}
               `:''}
-              ${r.status==='paid'&&canAdmin()?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" title="Edit amount paid" onclick="openEditPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">✏️</button>`:''}
             </div>
           </div>`;
         }).join('')}
@@ -2407,29 +2434,39 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   // Group by member — show net balance across all sessions
   const memberDebts = {}; // memberId -> {nm, totalBal, sessions:[{sid,label,bal,paid,owed}]}
 
-  STATE.sessions.forEach(ss=>{
+  STATE.sessions.forEach(function(ss){
     const sAtt=ss.attendees||[];
     const sExp=ss.expenses||[];
-    const sExpTotal=sExp.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
-    const sPH=parseFloat(ss.perHead)||(sAtt.length>0?sExpTotal/sAtt.length:0);
-    if(!sPH) return;
+    if(!sAtt.length) return;
     const sExpPayer={};
-    sExp.forEach(e=>{ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+    sExp.forEach(function(e){ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
 
-    sAtt.forEach(aid=>{
+    sAtt.forEach(function(aid){
       if(aid===payerId) return;
+      // Use includedPlayers-aware share (consistent with renderChipinBody)
+      const sMyShare=(function(){
+        if(!sExp.length) return parseFloat(ss.perHead)||0;
+        const fs=sExp.reduce(function(sum,e){
+          const amt=parseFloat(e.amount)||0;if(!amt)return sum;
+          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:sAtt;
+          if(!incl.includes(aid))return sum;
+          return sum+Math.round((amt/incl.length)*100)/100;
+        },0);
+        return fs>0?fs:(parseFloat(ss.perHead)||0);
+      })();
+      if(!sMyShare) return;
       const sExpPaid=sExpPayer[aid]||0;
-      const sNetRef=sExpPaid-sPH;
-      if(sNetRef>0) return; // also an expense payer with net refund — skip
-      const sPay=(ss.payments||[]).find(p=>p.memberId===aid);
+      const sNetRef=sExpPaid-sMyShare;
+      if(sNetRef>0) return; // also a net expense payer — skip
+      const sPay=(ss.payments||[]).find(function(p){return p.memberId===aid;});
       const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
-      const sOwed=Math.max(0,sPH-sExpPaid);
+      const sOwed=Math.max(0,sMyShare-sExpPaid);
       const sBal=sOwed-sPaid;
       if(sBal>0.005){
-        const m=STATE.members.find(x=>x.id===aid);
+        const m=STATE.members.find(function(x){return x.id===aid;});
         if(!memberDebts[aid]) memberDebts[aid]={aid, nm:m?m.name:'?', totalBal:0, sessions:[]};
         memberDebts[aid].totalBal+=sBal;
-        memberDebts[aid].sessions.push({sid:ss.id, label:fmtDate(ss.date)+(ss.venue?' · '+esc(ss.venue):''), bal:sBal, paid:sPaid, owed:sOwed});
+        memberDebts[aid].sessions.push({sid:ss.id, date:ss.date, label:fmtDate(ss.date)+(ss.venue?' · '+esc(ss.venue):''), bal:sBal, paid:sPaid, owed:sOwed});
       }
     });
   });
@@ -2560,9 +2597,9 @@ window.applyRefundOffset = async function(){
   for(const [targetId, offsetAmt] of Object.entries(selections)){
     if(!offsetAmt||offsetAmt<0.01)continue;
     const nm=(STATE.members.find(x=>x.id===targetId)||{}).name||'?';
-    // Get this player's session debts (oldest first)
+    // Get this player's session debts (oldest first by real date)
     const playerEntry=eligiblePlayers.find(p=>p.aid===targetId);
-    const sessionDebts=(playerEntry?.sessions||[]).slice().sort((a,b)=>new Date(a.label)-new Date(b.label));
+    const sessionDebts=(playerEntry?.sessions||[]).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
 
     let remainingOffset=offsetAmt;
     let playerApplied=0;
@@ -2694,18 +2731,16 @@ window.manualSetPerHead = async function(sid){
   catch(e){ toast(e.message,'error'); }
 };
 
-window.openPayModal = function(sid,mid,mname,currentPaid,perHead){
-  // Gather ALL unpaid session balances for this member across all sessions (oldest first)
-  const allSessionDebts = [];
-  let totalSessionDebt = 0;
+// ---- helpers used by pay modal ----
+function _buildPayDebts(mid){
+  const allSessionDebts=[];
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
   sortedSessions.forEach(s=>{
     const sAtt=s.attendees||[];
-    if(!sAtt.includes(mid)) return;
+    if(!sAtt.includes(mid))return;
     const sExp=s.expenses||[];
-    // Compute this member's true share via includedPlayers (consistent with renderChipinBody)
     const sMyShare=(()=>{
-      if(!sExp.length) return parseFloat(s.perHead)||0;
+      if(!sExp.length)return parseFloat(s.perHead)||0;
       const fs=sExp.reduce((sum,e)=>{
         const amt=parseFloat(e.amount)||0;if(!amt)return sum;
         const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:sAtt;
@@ -2714,55 +2749,124 @@ window.openPayModal = function(sid,mid,mname,currentPaid,perHead){
       },0);
       return fs>0?fs:(parseFloat(s.perHead)||0);
     })();
-    if(!sMyShare) return;
+    if(!sMyShare)return;
     const sExpPayer={};
-    sExp.forEach(e=>{ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+    sExp.forEach(e=>{if(e.paidBy)sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0);});
     const sExpPaid=sExpPayer[mid]||0;
-    const sNetRef=sExpPaid-sMyShare;
-    if(sNetRef>0) return; // expense payer with net refund — skip
+    if(sExpPaid-sMyShare>0)return; // net expense payer — skip
     const sPay=(s.payments||[]).find(p=>p.memberId===mid);
     const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
     const sOwed=Math.max(0,sMyShare-sExpPaid);
     const sBal=sOwed-sPaid;
-    if(sBal>0.005) allSessionDebts.push({sid:s.id, label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''), owed:sOwed, paid:sPaid, bal:sBal});
+    if(sBal>0.005)allSessionDebts.push({sid:s.id,label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),owed:sOwed,paid:sPaid,bal:sBal});
   });
-  totalSessionDebt = allSessionDebts.reduce((sum,d)=>sum+d.bal,0);
-  const totalDue = totalSessionDebt;
+  return allSessionDebts;
+}
+
+function _renderPayModalTotal(){
+  // Sum up all checked session amounts and update the running total display
+  let total=0;
+  document.querySelectorAll('.pay-sess-row').forEach(row=>{
+    if(row.querySelector('.pay-sess-cb')?.checked){
+      total+=parseFloat(row.querySelector('.pay-sess-amt')?.value)||0;
+    }
+  });
+  const el=document.getElementById('payTotalDisplay');
+  if(el) el.textContent=fmtMoney(total);
+}
+
+window.openPayModal = function(sid,mid,mname,currentPaid,perHead){
+  const allSessionDebts=_buildPayDebts(mid);
+  const totalDue=allSessionDebts.reduce((s,d)=>s+d.bal,0);
 
   // Store for saveChipinPayment
-  window._payMid = mid;
-  window._payDebts = allSessionDebts;
+  window._payMid=mid;
+  window._payDebts=allSessionDebts;
+
+  const rowsHtml=allSessionDebts.map((d,i)=>`
+    <div class="pay-sess-row" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius2);margin-bottom:6px">
+      <input type="checkbox" class="pay-sess-cb" data-idx="${i}" checked
+        style="width:16px;height:16px;accent-color:var(--primary);cursor:pointer;flex-shrink:0"
+        onchange="_onPaySessCbChange(this)"/>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--text)">${d.label}</div>
+        <div style="font-size:10px;color:var(--text3)">Balance: <span style="color:var(--red)">${fmtMoney(d.bal)}</span></div>
+      </div>
+      <input type="number" class="pay-sess-amt form-input" data-idx="${i}"
+        value="${d.bal.toFixed(2)}" min="0" max="${d.bal.toFixed(2)}" step="0.01" inputmode="decimal"
+        style="width:100px;text-align:right;font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;padding:6px 8px"
+        oninput="_renderPayModalTotal()"/>
+    </div>
+  `).join('');
 
   document.getElementById('payModalBody').innerHTML=`
     <div class="modal-header" style="margin-bottom:12px">
       <div class="modal-title">💰 Record Payment</div>
       <button class="modal-close" onclick="closeModal('payModal')">✕</button>
     </div>
-    <div style="margin-bottom:12px">
-      <div style="font-size:14px;font-weight:600">${esc(mname)}</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:2px">Total outstanding: <span style="color:var(--red);font-weight:700">${fmtMoney(totalDue)}</span></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+      <div>
+        <div style="font-size:14px;font-weight:600">${esc(mname)}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">Total outstanding: <span style="color:var(--red);font-weight:700">${fmtMoney(totalDue)}</span></div>
+      </div>
+      <div style="display:flex;gap:5px">
+        <button class="btn btn-ghost btn-xs" onclick="_paySelectAll(true)">All</button>
+        <button class="btn btn-ghost btn-xs" onclick="_paySelectAll(false)">None</button>
+      </div>
     </div>
-    ${allSessionDebts.length>1?`
-    <div style="background:var(--surface2);border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11px">
-      <div style="color:var(--text3);margin-bottom:5px;font-weight:600">Breakdown (oldest first)</div>
-      ${allSessionDebts.map(d=>`<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid var(--border)">
-        <span style="color:var(--text2)">${d.label}</span>
-        <span style="color:var(--red)">${fmtMoney(d.bal)}</span>
-      </div>`).join('')}
-    </div>`:''}
-    <div class="form-group"><label class="form-label">Amount Paying Now (AED)</label>
-      <input type="number" class="form-input" id="pAmt" value="${totalDue.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
+    <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);font-family:'Barlow Condensed',sans-serif;margin-bottom:8px">
+      Select sessions to pay — adjust amounts as needed
+    </div>
+    ${rowsHtml||'<div class="empty" style="padding:16px"><div class="empty-text">No outstanding balances.</div></div>'}
+    <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius2);padding:10px 12px;margin:10px 0;display:flex;align-items:center;justify-content:space-between">
+      <span style="font-family:'Barlow Condensed',sans-serif;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text3)">Paying Now</span>
+      <span id="payTotalDisplay" style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--green)">${fmtMoney(totalDue)}</span>
     </div>
     <div class="form-group"><label class="form-label">Note (optional)</label>
-      <input class="form-input" id="pNote" placeholder="e.g. Cash, Bank Transfer" autocomplete="off"/>
+      <input class="form-input" id="pNote" placeholder="e.g. Cash, GCash, Bank Transfer" autocomplete="off"/>
     </div>
     <div class="modal-footer" style="margin-top:0;padding-bottom:0">
-      ${totalDue>0?`<button class="btn btn-green btn-sm" onclick="document.getElementById('pAmt').value=${totalDue.toFixed(2)}">Full</button>`:''}
       <button class="btn btn-ghost" onclick="closeModal('payModal')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveChipinPayment('${sid}','${mid}',${totalDue})">Save</button>
+      <button class="btn btn-primary" onclick="saveChipinPayment('${sid}','${mid}')">Save Payment</button>
     </div>
   `;
   openModal('payModal');
+};
+
+window._onPaySessCbChange = function(cb){
+  const row=cb.closest('.pay-sess-row');
+  const amtInput=row.querySelector('.pay-sess-amt');
+  const idx=parseInt(cb.dataset.idx);
+  const debt=window._payDebts[idx];
+  if(!cb.checked){
+    amtInput.value='0.00';
+    amtInput.disabled=true;
+    row.style.opacity='0.45';
+  } else {
+    amtInput.value=debt.bal.toFixed(2);
+    amtInput.disabled=false;
+    row.style.opacity='1';
+  }
+  _renderPayModalTotal();
+};
+
+window._paySelectAll = function(selectAll){
+  document.querySelectorAll('.pay-sess-row').forEach((row,i)=>{
+    const cb=row.querySelector('.pay-sess-cb');
+    const amtInput=row.querySelector('.pay-sess-amt');
+    const debt=window._payDebts[i];
+    cb.checked=selectAll;
+    if(selectAll){
+      amtInput.value=debt.bal.toFixed(2);
+      amtInput.disabled=false;
+      row.style.opacity='1';
+    } else {
+      amtInput.value='0.00';
+      amtInput.disabled=true;
+      row.style.opacity='0.45';
+    }
+  });
+  _renderPayModalTotal();
 };
 
 // Edit existing payment amount for a specific session
@@ -2815,45 +2919,46 @@ window.saveEditPayment = async function(sid,mid,totalOwed){
   }catch(e){toast(e.message,'error');}
 };
 
-window.saveChipinPayment = async function(sid,mid,totalDue){
-  let remaining=parseFloat(document.getElementById('pAmt').value)||0;
-  const note=document.getElementById('pNote').value.trim();
+window.saveChipinPayment = async function(sid,mid){
+  const note=document.getElementById('pNote')?.value.trim()||'';
   const debts=window._payDebts||[];
 
-  if(!debts.length){
-    // Fallback: just save to current session
-    const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
+  // Collect selected sessions and their chosen amounts from the modal rows
+  const selections=[];
+  document.querySelectorAll('.pay-sess-row').forEach((row,i)=>{
+    const cb=row.querySelector('.pay-sess-cb');
+    if(!cb?.checked)return;
+    const amt=parseFloat(row.querySelector('.pay-sess-amt')?.value)||0;
+    if(amt<=0.005)return;
+    const debt=debts[i];
+    if(!debt)return;
+    // Cap at actual balance — prevent overpayment
+    const apply=Math.min(amt,debt.bal);
+    selections.push({debt,apply});
+  });
+
+  if(!selections.length){toast('Select at least one session and amount','error');return;}
+
+  // Build per-session Firestore updates
+  const updates={}; // sessionId -> payments[]
+  for(const {debt,apply} of selections){
+    const s=STATE.sessions.find(x=>x.id===debt.sid);if(!s)continue;
     const payments=[...(s.payments||[])];
     const idx=payments.findIndex(p=>p.memberId===mid);
-    const entry={memberId:mid,amountPaid:remaining,status:remaining>=totalDue?'paid':remaining>0?'partial':'unpaid',note,updatedAt:new Date().toISOString()};
-    if(idx>=0)payments[idx]=entry;else payments.push(entry);
-    try{ await updateDoc(doc(db,'sessions',sid),{payments}); closeModal('payModal'); toast('Payment saved!','success'); loadChipinSession(); }
-    catch(e){ toast(e.message,'error'); }
-    return;
-  }
-
-  // Distribute payment across sessions oldest-first
-  const updates={}; // sessionId -> {payments array}
-  for(const debt of debts){
-    if(remaining<=0.005) break;
-    const s=STATE.sessions.find(x=>x.id===debt.sid);if(!s)continue;
-    const apply=Math.min(remaining, debt.bal);
     const newPaid=debt.paid+apply;
     const newStatus=newPaid>=debt.owed-0.005?'paid':newPaid>0?'partial':'unpaid';
-    const payments=[...(s.payments||[])];
-    const idx=payments.findIndex(p=>p.memberId===mid);
     const entry={memberId:mid,amountPaid:newPaid,status:newStatus,note,updatedAt:new Date().toISOString()};
     if(idx>=0)payments[idx]=entry;else payments.push(entry);
     updates[debt.sid]=payments;
-    remaining-=apply;
   }
 
+  const totalApplied=selections.reduce((s,x)=>s+x.apply,0);
   try{
     await Promise.all(Object.entries(updates).map(([sesId,pmts])=>updateDoc(doc(db,'sessions',sesId),{payments:pmts})));
     closeModal('payModal');
-    toast('Payment saved across '+(Object.keys(updates).length)+' session(s)!','success');
+    toast(`${fmtMoney(totalApplied)} saved across ${Object.keys(updates).length} session(s)!`,'success');
     loadChipinSession();
-  }catch(e){ toast(e.message,'error'); }
+  }catch(e){toast(e.message,'error');}
 };
 
 // ============ STATS ============
@@ -3065,19 +3170,23 @@ window.showProjectDetail = function(pid){
 
 window.openProjectPayModal = function(pid,mid,mname,currentPaid,due){
   document.getElementById('payModalBody').innerHTML=`
+    <div class="modal-header" style="margin-bottom:12px">
+      <div class="modal-title">💰 Project Payment</div>
+      <button class="modal-close" onclick="closeModal('payModal');showProjectDetail('${pid}');openModal('detailModal')">✕</button>
+    </div>
     <div style="margin-bottom:12px">
       <div style="font-size:14px;font-weight:600">${esc(mname)}</div>
-      <div style="font-size:12px;color:var(--text3)">Due: ${fmtMoney(due)} · Paid: ${fmtMoney(currentPaid)}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:2px">Due: <span style="color:var(--gold)">${fmtMoney(due)}</span> · Paid so far: <span style="color:var(--green)">${fmtMoney(currentPaid)}</span></div>
     </div>
     <div class="form-group"><label class="form-label">Amount Paid (AED)</label>
-      <input type="number" class="form-input" id="ppAmt" value="${currentPaid}" min="0" step="0.01" inputmode="decimal"/>
+      <input type="number" class="form-input" id="ppAmt" value="${currentPaid.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
     </div>
-    <div class="form-group"><label class="form-label">Custom Due Amount (override)</label>
-      <input type="number" class="form-input" id="ppDue" value="${due}" min="0" step="0.01" inputmode="decimal"/>
+    <div class="form-group"><label class="form-label">Custom Due Amount (override, optional)</label>
+      <input type="number" class="form-input" id="ppDue" value="${due.toFixed(2)}" min="0" step="0.01" inputmode="decimal"/>
     </div>
     <div class="modal-footer" style="margin-top:0;padding-bottom:0">
-      ${due?`<button class="btn btn-green btn-sm" onclick="document.getElementById('ppAmt').value=${due}">Full</button>`:''}
-      <button class="btn btn-ghost" onclick="closeModal('payModal');showProjectDetail('${pid}')">Cancel</button>
+      ${due?`<button class="btn btn-green btn-sm" onclick="document.getElementById('ppAmt').value='${due.toFixed(2)}'">Full</button>`:''}
+      <button class="btn btn-ghost" onclick="closeModal('payModal');showProjectDetail('${pid}');openModal('detailModal')">Cancel</button>
       <button class="btn btn-primary" onclick="saveProjectPayment('${pid}','${mid}')">Save</button>
     </div>
   `;
