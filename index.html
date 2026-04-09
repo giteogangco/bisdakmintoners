@@ -2299,8 +2299,8 @@ function renderChipinBody(s){
     let status;
     if(!myShare) status='noamt';
     else if(isExpensePayer) status='refund';
-    else if(remainingCredit>0.005) status='paid'; // credit covers this session fully
-    else if(paid>=totalOwed&&totalOwed>0) status='paid';
+    else if(remainingCredit>0.005) status='paid'; // credit fully covers this session
+    else if(bal<0.005&&(totalOwed>0||paid>0)) status='paid'; // bal≈0: paid off (handles float drift)
     else if(paid>0) status='partial';
     else status='unpaid';
 
@@ -3226,7 +3226,7 @@ window.showProjectDetail = function(pid){
       const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
-      const status=!due?'noamt':paid>=due?'paid':paid>0?'partial':'unpaid';
+      const status=!due?'noamt':bal<0.005&&(due>0||paid>0)?'paid':paid>0?'partial':'unpaid';
       return `<div class="chipin-row ${status}" style="margin-bottom:5px">
         <div style="display:flex;align-items:center;gap:8px;flex:1">
           <div class="m-avatar" style="width:26px;height:26px;font-size:10px;background:${avatarColor(nm)}22;color:${avatarColor(nm)}">${initials(nm)}</div>
@@ -3402,10 +3402,11 @@ function renderHistoryCard(s){
           })():0;
           const isExpPayer=expPaid>0&&expPaid>myShare;
           const owed=isExpPayer?0:Math.max(0,myShare-expPaid);
+          const balH=owed-paid;
           let status='';
           if(perHead){
             if(isExpPayer) status='<span class="badge badge-primary">Paid Exp</span>';
-            else if(paid>=owed&&owed>0) status='<span class="badge badge-green">Paid</span>';
+            else if(balH<0.005&&(owed>0||paid>0)) status='<span class="badge badge-green">Paid</span>';
             else if(paid>0) status='<span class="badge badge-gold">Part</span>';
             else if(owed>0) status='<span class="badge badge-red">Unpaid</span>';
             else status='<span class="badge badge-ghost">—</span>';
