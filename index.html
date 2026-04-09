@@ -2192,25 +2192,11 @@ function renderChipinBody(s){
     if(p.status==='refund-offset') return sum; // expense payer offset, no cash in
     return sum+(parseFloat(p.amountPaid)||0);
   },0);
-  // totalTarget = sum of what normal players owe (excluding expense payers with net refunds)
-  const expPayerTotalsForStat={};
-  expenses.forEach(e=>{ if(e.paidBy) expPayerTotalsForStat[e.paidBy]=(expPayerTotalsForStat[e.paidBy]||0)+(parseFloat(e.amount)||0); });
-  const normalOwed=att.reduce((sum,aid)=>{
-    const myShare=(()=>{
-      if(!expenses.length) return perHead;
-      const fs=expenses.reduce((s2,e)=>{
-        const amt=parseFloat(e.amount)||0;if(!amt)return s2;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-        if(!incl.includes(aid))return s2;
-        return s2+Math.round((amt/incl.length)*100)/100;
-      },0);
-      return fs>0?fs:perHead;
-    })();
-    const expPaid=expPayerTotalsForStat[aid]||0;
-    const netRef=expPaid-myShare;
-    if(netRef>0) return sum; // expense payer — owes nothing
-    return sum+Math.max(0,myShare-expPaid);
-  },0);
+  // normalOwed = sum of what each non-expense-payer actually owes IN CASH for this session
+  // Must account for carry-over credits (e.g. Mae's credit covers her share → she owes 0 cash)
+  // Computed AFTER getCarryover is defined below, so we defer this to after row computation.
+  // Placeholder — will be replaced with accurate value from rows after they're built.
+  let normalOwed=0; // set after rows are built
   const isMember=STATE.role==='member';
   const myId=STATE.memberDoc?.id;
 
@@ -2320,6 +2306,10 @@ function renderChipinBody(s){
 
     return {aid,nm,m,paid,bal,status,perHead:myShare,carryover,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer};
   });
+  // Compute normalOwed from ALL rows (before member filtering) — carry-over-adjusted
+  // Credit-covered players (totalOwed=0) correctly contribute 0, fixing false "Remaining"
+  normalOwed=rows.filter(r=>!r.isExpensePayer).reduce((sum,r)=>sum+r.totalOwed,0);
+
   if(isMember&&myId) rows=rows.filter(r=>r.aid===myId);
 
   // Separate expense payers (to return) from normal payers
@@ -2371,13 +2361,14 @@ function renderChipinBody(s){
                   ${autoSettleable?` — <span style="color:var(--gold)">deducted from refund → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></span>`:' — exceeds refund'}
                 </div>`:''}
                 ${carryCredit>0.005?`<div style="font-size:10px;color:var(--green);margin-top:2px">✓ Carry-over credit: +${fmtMoney(carryCredit)} → Net return: <strong>${fmtMoney(effectiveTotal)}</strong></div>`:''}
-                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · Remaining: '+fmtMoney(displayRefund):' · Fully covered ✓'}</div>`:''}
+                ${alreadyApplied<=0&&displayRefund>0.005?`<div style="font-size:10px;color:var(--text3);margin-top:2px">No offset applied yet · <span style="color:var(--gold)">${fmtMoney(displayRefund)} to return as cash or use ⚙ Offset</span></div>`:''}
+                ${alreadyApplied>0?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Offset applied: ${fmtMoney(alreadyApplied)}${displayRefund>0.005?' · <span style="color:var(--gold)">'+fmtMoney(displayRefund)+' still to return as cash or future offset</span>':' · Fully covered ✓'}</div>`:''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
               ${fullySettled
                 ?'<span class="badge badge-green">Settled</span>'
-                :`<span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(displayRefund)}</span>`}
+                :displayRefund>0.005?`<span class="badge badge-gold" style="font-size:9px" title="Still owed to ${esc(r.nm)} — return as cash or use Offset">↩ ${fmtMoney(displayRefund)}</span>`:'<span class="badge badge-green">Settled</span>'}
               ${canAdmin()&&carryDebt>0.005&&!fullySettled?`<button class="btn btn-gold btn-xs" onclick="autoSettleCarryOver('${s.id}','${r.aid}','${esc(r.nm)}',${carryDebt})">✓ Settle Debt</button>`:''}
               ${canAdmin()&&!fullySettled&&displayRefund>0.005?`<button class="btn btn-ghost btn-xs" onclick="openRefundOffsetModal('${s.id}','${r.aid}','${esc(r.nm)}',${displayRefund})">⚙ Offset</button>`:''}
             </div>
