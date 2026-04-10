@@ -922,8 +922,13 @@ function renderPage(page){
 function renderDashboard(el){
   const lastSession = STATE.sessions[0];
   const outstanding = gatherOutstanding();
-  const debtors = outstanding.filter(o=>o.balance>0.005);
-  const creditHolders = outstanding.filter(o=>o.creditBal>0.05&&o.balance<=0.005);
+  const debtors = outstanding.filter(o=>o.netDebt>0.005);
+  const creditHolders = outstanding.filter(o=>o.netCredit>0.05);
+  const totalOutstanding = debtors.reduce((s,o)=>s+o.netDebt,0);
+  const totalExcess = creditHolders.reduce((s,o)=>s+o.netCredit,0);
+  // The difference (Credit - Outstanding) = total net cash overpaid by members.
+  // This is mathematically correct: group holds that extra cash for the overpayer(s).
+  const netOverpay = totalExcess - totalOutstanding;
   el.innerHTML = `
     <div class="sec-header">
       <div><div class="sec-title">Dashboard</div><div class="sec-sub">🏸 Overview</div></div>
@@ -935,6 +940,28 @@ function renderDashboard(el){
       <div class="stat-card"><div class="stat-label">Unpaid</div><div class="stat-val" style="color:var(--red)">${debtors.length}</div></div>
       <div class="stat-card"><div class="stat-label">Excess Credit</div><div class="stat-val" style="color:var(--green)">${creditHolders.length}</div></div>
     </div>
+    ${debtors.length||creditHolders.length?`
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title" style="margin-bottom:10px">💰 Balance Summary</div>
+      <div class="grid2" style="margin-bottom:10px">
+        <div class="stat-card"><div class="stat-label">Total Outstanding</div><div class="stat-val" style="font-size:18px;color:var(--red)">${fmtMoney(totalOutstanding)}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Excess Credit</div><div class="stat-val" style="font-size:18px;color:var(--green)">${fmtMoney(totalExcess)}</div></div>
+      </div>
+      ${netOverpay>0.05?`
+      <div style="background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:11px;color:var(--text2)">
+        <span style="color:var(--primary);font-weight:600">ℹ Difference: ${fmtMoney(netOverpay)}</span>
+        = net cash overpaid by members that the group is holding.
+        Excess credit exceeds outstanding because someone paid more than their share.
+        Once they offset or receive that back, both totals will match.
+      </div>`:netOverpay<-0.05?`
+      <div style="background:rgba(255,68,102,0.06);border:1px solid rgba(255,68,102,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:11px;color:var(--text2)">
+        <span style="color:var(--red);font-weight:600">⚠ Difference: ${fmtMoney(Math.abs(netOverpay))}</span>
+        = outstanding exceeds credits — some debts are not yet covered by any credit.
+      </div>`:`
+      <div style="background:rgba(0,232,153,0.06);border:1px solid rgba(0,232,153,0.2);border-radius:var(--radius2);padding:8px 12px;font-size:11px;color:var(--green)">
+        ✓ Outstanding and excess credit are balanced — no net overpayments.
+      </div>`}
+    </div>`:''}
     <div class="card" style="margin-bottom:12px">
       <div class="card-title">🏸 Latest Session</div>
       ${lastSession ? renderLatestSessionCard(lastSession) : '<div class="empty" style="padding:16px"><div class="empty-text">No sessions yet.</div></div>'}
@@ -983,6 +1010,8 @@ function gatherOutstanding(){
     const expenses=s.expenses||[];
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+
+    // Process attendees — compute full session delta
     att.forEach(aid=>{
       const myShare=(()=>{
         if(!expenses.length) return parseFloat(s.perHead)||0;
@@ -1004,18 +1033,29 @@ function gatherOutstanding(){
       const netRefund=expPaid-myShare;
       let delta;
       if(netRefund>0){
-        // Expense payer: unrecovered refund = credit for them
         delta=-Math.max(0,netRefund-refundApplied);
       } else {
-        // Normal player: owed - paid (negative = overpayment credit)
         const rawDelta=Math.max(0,myShare-expPaid)-paid;
         const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
         const netCredit=Math.max(0,overpayCredit-refundApplied);
         delta=rawDelta<0?-netCredit:rawDelta;
       }
-      // creditOffsetApplied reduces credit regardless of payer type — apply unconditionally
+      // creditOffsetApplied reduces credit regardless of payer type
       if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
       sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
+    });
+
+    // CRITICAL FIX: Also process creditOffsetApplied for non-attendees.
+    // When a player uses carry-over credit to offset others, creditOffsetApplied is stored
+    // on whichever session was open in Chip-In — they may NOT be an attendee of that session.
+    // If we skip their payment record, their credit appears unreduced (too large).
+    (s.payments||[]).forEach(pay=>{
+      const aid=pay.memberId;
+      if(att.includes(aid)) return; // already handled above
+      const creditOffsetApplied=parseFloat(pay.creditOffsetApplied)||0;
+      if(creditOffsetApplied>0.005){
+        sessionNetBal[aid]=(sessionNetBal[aid]||0)+creditOffsetApplied;
+      }
     });
   });
 
@@ -1046,11 +1086,21 @@ function gatherOutstanding(){
     });
   });
 
-  return Object.entries(memberTotals).map(([id,d])=>({
-    memberId:id, name:d.name,
-    sessionBal:d.sessionBal, projectBal:d.projectBal, creditBal:d.creditBal||0,
-    balance:d.sessionBal+d.projectBal
-  })).filter(o=>o.balance>0.005||o.creditBal>0.05).sort((a,b)=>(b.balance+b.creditBal)-(a.balance+a.creditBal));
+  return Object.entries(memberTotals).map(([id,d])=>{
+    const balance=d.sessionBal+d.projectBal; // total they owe the group
+    const creditBal=d.creditBal||0;          // total group owes them (session overpay/refund)
+    // Net position: positive = net debtor, negative = net creditor
+    // A player can have both (e.g. project debt + session credit) — show net
+    const netCredit=Math.max(0,creditBal-balance); // true remaining credit after netting debts
+    const netDebt=Math.max(0,balance-creditBal);   // true remaining debt after netting credits
+    return {
+      memberId:id, name:d.name,
+      sessionBal:d.sessionBal, projectBal:d.projectBal,
+      creditBal, balance,
+      netCredit, netDebt
+    };
+  }).filter(o=>o.netDebt>0.005||o.netCredit>0.05)
+    .sort((a,b)=>(b.netDebt+b.netCredit)-(a.netDebt+a.netCredit));
 }
 
 function renderOutstandingList(list){
@@ -1065,11 +1115,12 @@ function renderOutstandingList(list){
             ${o.sessionBal>0.005?`<span>💸 Sessions: ${fmtMoney(o.sessionBal)}</span>`:''}
             ${o.sessionBal>0.005&&o.projectBal>0.005?' · ':''}
             ${o.projectBal>0.005?`<span>📋 Projects: ${fmtMoney(o.projectBal)}</span>`:''}
+            ${o.creditBal>0.05?`<span style="color:var(--green)"> · −${fmtMoney(o.creditBal)} credit applied</span>`:''}
             <span style="color:var(--text3);margin-left:4px">· tap for details</span>
           </div>
         </div>
       </div>
-      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:14px;font-weight:700;flex-shrink:0">${fmtMoney(o.balance)}</span>
+      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--red);font-size:14px;font-weight:700;flex-shrink:0">${fmtMoney(o.netDebt)}</span>
     </div>
   `).join('');
 }
@@ -1083,12 +1134,13 @@ function renderCreditList(list){
         <div style="min-width:0">
           <div style="font-size:12px;font-weight:600;color:var(--green)">${esc(o.name)}</div>
           <div style="font-size:10px;color:var(--text3)">
-            💚 Unallocated excess credit · <span style="color:var(--green)">${fmtMoney(o.creditBal)} to return or offset</span>
+            💚 Net excess credit · <span style="color:var(--green)">${fmtMoney(o.netCredit)} to return or offset</span>
+            ${o.balance>0.005?`<span style="color:var(--text3)"> · (${fmtMoney(o.creditBal)} credit − ${fmtMoney(o.balance)} debt)</span>`:''}
             <span style="color:var(--text3);margin-left:4px">· tap for details</span>
           </div>
         </div>
       </div>
-      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--green);font-size:14px;font-weight:700;flex-shrink:0">↩ ${fmtMoney(o.creditBal)}</span>
+      <span style="font-family:'Barlow Condensed',sans-serif;color:var(--green);font-size:14px;font-weight:700;flex-shrink:0">↩ ${fmtMoney(o.netCredit)}</span>
     </div>
   `).join('');
 }
@@ -1102,7 +1154,21 @@ window.showOutstandingBreakdown = function(memberId, memberName){
   let latestSid = null;
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
-    if(!att.includes(memberId)) return;
+    if(!att.includes(memberId)){
+      // Not an attendee — but still check for creditOffsetApplied on their payment record
+      const pay=(s.payments||[]).find(p=>p.memberId===memberId);
+      const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
+      if(creditOffsetApplied>0.005){
+        sessionNetBal+=creditOffsetApplied; // reduces credit
+        sessionRows.push({
+          label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),
+          owed:0, paid:0, delta:creditOffsetApplied, perHead:0, expPaid:0,
+          refundApplied:0, creditOffsetApplied, date:s.date,
+          isCredit:false, netRefund:0, isCreditOffsetOnly:true
+        });
+      }
+      return;
+    }
     const expenses=s.expenses||[];
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
@@ -1175,21 +1241,24 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     ${sessionRows.length?`
       <div class="card-title" style="margin-bottom:8px">💸 Session Balances</div>
       ${sessionRows.map(r=>`
-        <div style="background:${r.isCredit?'rgba(0,232,153,0.06)':'var(--surface2)'};border:1px solid ${r.isCredit?'rgba(0,232,153,0.2)':'var(--border)'};border-radius:var(--radius2);padding:9px 12px;margin-bottom:6px">
+        <div style="background:${r.isCreditOffsetOnly?'rgba(255,196,51,0.05)':r.isCredit?'rgba(0,232,153,0.06)':'var(--surface2)'};border:1px solid ${r.isCreditOffsetOnly?'rgba(255,196,51,0.25)':r.isCredit?'rgba(0,232,153,0.2)':'var(--border)'};border-radius:var(--radius2);padding:9px 12px;margin-bottom:6px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <span style="font-size:12px;font-weight:600">${r.label}</span>
-            <span style="font-family:'Barlow Condensed',sans-serif;color:${r.isCredit?'var(--green)':'var(--red)'};font-size:13px;font-weight:700">
+            <span style="font-size:12px;font-weight:600">${r.label}${r.isCreditOffsetOnly?'<span style="font-size:10px;color:var(--gold);margin-left:6px">(not attended)</span>':''}</span>
+            <span style="font-family:'Barlow Condensed',sans-serif;color:${r.isCredit?'var(--green)':r.isCreditOffsetOnly?'var(--gold)':'var(--red)'};font-size:13px;font-weight:700">
               ${r.isCredit?'−':'+'}${fmtMoney(Math.abs(r.delta))}
             </span>
           </div>
           <div style="font-size:10px;color:var(--text3);display:flex;flex-wrap:wrap;gap:6px">
-            <span>Per head: <span style="color:var(--gold)">${fmtMoney(r.perHead)}</span></span>
-            ${r.expPaid>0?`<span>· Exp paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span></span>`:''}
-            <span>· Owed: <span style="color:var(--text)">${fmtMoney(r.owed)}</span></span>
-            <span>· Paid: <span style="color:var(--green)">${fmtMoney(r.paid)}</span></span>
-            ${r.refundApplied>0.005?`<span>· Refund offset: <span style="color:var(--text2)">${fmtMoney(r.refundApplied)}</span></span>`:''}
-            ${r.creditOffsetApplied>0.005?`<span>· Credit offset used: <span style="color:var(--text2)">${fmtMoney(r.creditOffsetApplied)}</span></span>`:''}
-            ${r.isCredit?`<span style="color:var(--green)">✓ Unrecovered refund (offsets other debts)</span>`:''}
+            ${r.isCreditOffsetOnly
+              ?`<span style="color:var(--gold)">↩ ${fmtMoney(r.creditOffsetApplied)} carry-over credit used for offset here</span>`
+              :`<span>Per head: <span style="color:var(--gold)">${fmtMoney(r.perHead)}</span></span>
+              ${r.expPaid>0?`<span>· Exp paid: <span style="color:var(--primary)">${fmtMoney(r.expPaid)}</span></span>`:''}
+              <span>· Owed: <span style="color:var(--text)">${fmtMoney(r.owed)}</span></span>
+              <span>· Paid: <span style="color:var(--green)">${fmtMoney(r.paid)}</span></span>
+              ${r.refundApplied>0.005?`<span>· Refund offset: <span style="color:var(--text2)">${fmtMoney(r.refundApplied)}</span></span>`:''}
+              ${r.creditOffsetApplied>0.005?`<span>· Credit offset used: <span style="color:var(--text2)">${fmtMoney(r.creditOffsetApplied)}</span></span>`:''}
+              ${r.isCredit?`<span style="color:var(--green)">✓ Unrecovered refund (offsets other debts)</span>`:''}`
+            }
           </div>
         </div>
       `).join('')}
