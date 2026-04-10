@@ -997,77 +997,103 @@ function renderLatestSessionCard(s){
 }
 
 function gatherOutstanding(){
-  // Compute net balance per member across ALL sessions (respects carry-over credits)
-  // Positive netBal = owes money. Negative netBal = has unallocated excess credit.
+  // Compute net balance per member across ALL sessions using rolling carry-over.
+  // This matches _buildPayDebts logic: process sessions oldest→newest, carry credit/debt forward.
+  // Result: each member's TRUE net position (positive = owes, negative = net credit).
   const memberNames={};
   STATE.members.forEach(m=>{ memberNames[m.id]=m.name; });
 
-  const sessionNetBal={}; // memberId -> net AED (positive=owes, negative=credit)
+  // Track rolling carry per member across sessions (negative=credit, positive=debt)
+  const memberCarry={}; // memberId -> running carry after each session
+
+  // Also track non-attendee creditOffsetApplied (stored on sessions they didn't attend)
+  const memberNonAttendeeCredit={}; // memberId -> total creditOffsetApplied from non-attended sessions
 
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
+
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
     const expenses=s.expenses||[];
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
 
-    // Process attendees — compute full session delta
     att.forEach(aid=>{
+      const carry=memberCarry[aid]||0; // rolling carry into this session
       const myShare=(()=>{
         if(!expenses.length) return parseFloat(s.perHead)||0;
         const fs=expenses.reduce((sum,e)=>{
-          const amt=parseFloat(e.amount)||0;
-          if(!amt) return sum;
+          const amt=parseFloat(e.amount)||0; if(!amt) return sum;
           const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
           if(!incl.includes(aid)) return sum;
           return sum+Math.round((amt/incl.length)*100)/100;
         },0);
         return fs>0?fs:(parseFloat(s.perHead)||0);
       })();
-      if(!myShare&&!expPayerTotals[aid]) return;
+      if(!myShare&&!expPayerTotals[aid]){ return; }
+
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
       const paid=pay?parseFloat(pay.amountPaid)||0:0;
       const expPaid=expPayerTotals[aid]||0;
       const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
       const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
       const netRefund=expPaid-myShare;
-      let delta;
+
+      let newCarry;
       if(netRefund>0){
-        delta=-Math.max(0,netRefund-refundApplied);
+        // Expense payer: their credit = unrecovered refund
+        const unrecovered=Math.max(0,netRefund-refundApplied);
+        newCarry=carry-unrecovered; // credit reduces carry
+        // creditOffsetApplied reduces their credit
+        if(creditOffsetApplied>0.005) newCarry+=creditOffsetApplied;
       } else {
-        const rawDelta=Math.max(0,myShare-expPaid)-paid;
-        const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
-        const netCredit=Math.max(0,overpayCredit-refundApplied);
-        delta=rawDelta<0?-netCredit:rawDelta;
+        // Normal player: rawOwed = share + carry (carry can be negative = credit)
+        const sOwed=Math.max(0,myShare-expPaid);
+        const rawOwed=sOwed+carry; // negative = credit covers this session + leftover
+        const effectiveOwed=Math.max(0,rawOwed);
+        const sBal=effectiveOwed-paid;
+        if(sBal>0.005){
+          // Still owes cash after carry
+          const settledThisSession=Math.min(paid,effectiveOwed);
+          newCarry=rawOwed-settledThisSession;
+        } else {
+          // Fully settled (cash or credit)
+          newCarry=rawOwed-paid; // may be negative (leftover credit from overpay)
+          // If overpaid beyond carry: reduce credit by refundApplied (offsets already applied)
+          if(newCarry<-0.005){
+            const totalCredit=Math.abs(newCarry);
+            newCarry=-Math.max(0,totalCredit-refundApplied);
+          }
+        }
+        // creditOffsetApplied on this session reduces their carry credit
+        if(creditOffsetApplied>0.005) newCarry+=creditOffsetApplied;
       }
-      // creditOffsetApplied reduces credit regardless of payer type
-      if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
-      sessionNetBal[aid]=(sessionNetBal[aid]||0)+delta;
+      memberCarry[aid]=newCarry;
     });
 
-    // CRITICAL FIX: Also process creditOffsetApplied for non-attendees.
-    // When a player uses carry-over credit to offset others, creditOffsetApplied is stored
-    // on whichever session was open in Chip-In — they may NOT be an attendee of that session.
-    // If we skip their payment record, their credit appears unreduced (too large).
+    // Non-attendee creditOffsetApplied: stored on this session but member not attending
     (s.payments||[]).forEach(pay=>{
       const aid=pay.memberId;
-      if(att.includes(aid)) return; // already handled above
-      const creditOffsetApplied=parseFloat(pay.creditOffsetApplied)||0;
-      if(creditOffsetApplied>0.005){
-        sessionNetBal[aid]=(sessionNetBal[aid]||0)+creditOffsetApplied;
+      if(att.includes(aid)) return; // handled above
+      const coa=parseFloat(pay.creditOffsetApplied)||0;
+      if(coa>0.005){
+        memberNonAttendeeCredit[aid]=(memberNonAttendeeCredit[aid]||0)+coa;
       }
     });
   });
 
+  // Apply non-attendee creditOffsetApplied to final carry
+  Object.entries(memberNonAttendeeCredit).forEach(([aid,coa])=>{
+    memberCarry[aid]=(memberCarry[aid]||0)+coa;
+  });
+
+  // Build member totals from final carry values
   const memberTotals={};
-  // Collect both debtors (netBal > 0) and excess credit holders (netBal < -0.05)
-  Object.entries(sessionNetBal).forEach(([aid,netBal])=>{
+  Object.entries(memberCarry).forEach(([aid,netBal])=>{
     const nm=memberNames[aid]||'?';
     if(netBal>0.005){
       if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
       memberTotals[aid].sessionBal=netBal;
     } else if(netBal<-0.05){
-      // Has unallocated excess credit
       if(!memberTotals[aid]) memberTotals[aid]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
       memberTotals[aid].creditBal=Math.abs(netBal);
     }
@@ -1087,18 +1113,12 @@ function gatherOutstanding(){
   });
 
   return Object.entries(memberTotals).map(([id,d])=>{
-    const balance=d.sessionBal+d.projectBal; // total they owe the group
-    const creditBal=d.creditBal||0;          // total group owes them (session overpay/refund)
-    // Net position: positive = net debtor, negative = net creditor
-    // A player can have both (e.g. project debt + session credit) — show net
-    const netCredit=Math.max(0,creditBal-balance); // true remaining credit after netting debts
-    const netDebt=Math.max(0,balance-creditBal);   // true remaining debt after netting credits
-    return {
-      memberId:id, name:d.name,
-      sessionBal:d.sessionBal, projectBal:d.projectBal,
-      creditBal, balance,
-      netCredit, netDebt
-    };
+    const balance=d.sessionBal+d.projectBal;
+    const creditBal=d.creditBal||0;
+    const netCredit=Math.max(0,creditBal-balance);
+    const netDebt=Math.max(0,balance-creditBal);
+    return {memberId:id,name:d.name,sessionBal:d.sessionBal,projectBal:d.projectBal,
+      creditBal,balance,netCredit,netDebt};
   }).filter(o=>o.netDebt>0.005||o.netCredit>0.05)
     .sort((a,b)=>(b.netDebt+b.netCredit)-(a.netDebt+a.netCredit));
 }
@@ -1146,29 +1166,30 @@ function renderCreditList(list){
 }
 
 window.showOutstandingBreakdown = function(memberId, memberName){
-  // ---- replicate gatherOutstanding delta logic exactly ----
+  // Uses same rolling carry logic as gatherOutstanding for consistent numbers
   const sessionRows = [];
-  let sessionNetBal = 0; // matches sessionNetBal[memberId] in gatherOutstanding
+  let carry = 0; // rolling carry (negative=credit, positive=debt)
   const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
-  // Find the MOST RECENT session this member attended (used for Offset button sid)
   let latestSid = null;
+
   sortedSessions.forEach(s=>{
     const att=s.attendees||[];
     if(!att.includes(memberId)){
-      // Not an attendee — but still check for creditOffsetApplied on their payment record
+      // Non-attendee: check for creditOffsetApplied
       const pay=(s.payments||[]).find(p=>p.memberId===memberId);
-      const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
-      if(creditOffsetApplied>0.005){
-        sessionNetBal+=creditOffsetApplied; // reduces credit
+      const coa=pay?parseFloat(pay.creditOffsetApplied)||0:0;
+      if(coa>0.005){
+        carry+=coa; // reduces credit
         sessionRows.push({
           label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),
-          owed:0, paid:0, delta:creditOffsetApplied, perHead:0, expPaid:0,
-          refundApplied:0, creditOffsetApplied, date:s.date,
+          owed:0, paid:0, delta:coa, perHead:0, expPaid:0,
+          refundApplied:0, creditOffsetApplied:coa, date:s.date,
           isCredit:false, netRefund:0, isCreditOffsetOnly:true
         });
       }
       return;
     }
+
     const expenses=s.expenses||[];
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
@@ -1176,8 +1197,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const myShare=(()=>{
       if(!expenses.length) return parseFloat(s.perHead)||0;
       const fs=expenses.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0;
-        if(!amt) return sum;
+        const amt=parseFloat(e.amount)||0; if(!amt) return sum;
         const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
         if(!incl.includes(memberId)) return sum;
         return sum+Math.round((amt/incl.length)*100)/100;
@@ -1189,31 +1209,49 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
     const creditOffsetApplied=pay?parseFloat(pay.creditOffsetApplied)||0:0;
     const netRefund=expPaid-myShare;
-    let delta;
+
+    let delta; // change in carry this session (for display)
+    let newCarry;
     if(netRefund>0){
-      delta=-Math.max(0,netRefund-refundApplied); // credit (negative)
+      const unrecovered=Math.max(0,netRefund-refundApplied);
+      newCarry=carry-unrecovered;
+      if(creditOffsetApplied>0.005) newCarry+=creditOffsetApplied;
+      delta=newCarry-carry; // negative = credit gained
     } else {
-      // Normal player delta — negative means overpayment credit
-      const rawDelta=Math.max(0,myShare-expPaid)-paid;
-      const overpayCredit=rawDelta<0?Math.abs(rawDelta):0;
-      const netCredit=Math.max(0,overpayCredit-refundApplied);
-      delta=rawDelta<0?-netCredit:rawDelta;
+      const sOwed=Math.max(0,myShare-expPaid);
+      const rawOwed=sOwed+carry;
+      const effectiveOwed=Math.max(0,rawOwed);
+      const sBal=effectiveOwed-paid;
+      if(sBal>0.005){
+        const settled=Math.min(paid,effectiveOwed);
+        newCarry=rawOwed-settled;
+      } else {
+        newCarry=rawOwed-paid;
+        if(newCarry<-0.005){
+          const totalCredit=Math.abs(newCarry);
+          newCarry=-Math.max(0,totalCredit-refundApplied);
+        }
+      }
+      if(creditOffsetApplied>0.005) newCarry+=creditOffsetApplied;
+      delta=newCarry-carry;
     }
-    // creditOffsetApplied reduces credit regardless of payer type — apply unconditionally
-    if(creditOffsetApplied>0.005) delta+=creditOffsetApplied;
-    sessionNetBal+=delta;
+
+    carry=newCarry;
+    latestSid=s.id;
     const owed=Math.max(0,myShare-expPaid);
-    const sessionLabel=fmtDate(s.date)+(s.venue?' · '+esc(s.venue):'');
-    latestSid=s.id; // track most recent session (sessions sorted oldest-first)
+
     if(Math.abs(delta)>0.005){
       sessionRows.push({
-        label:sessionLabel, owed, paid, delta, perHead:myShare, expPaid,
+        label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),
+        owed, paid, delta, perHead:myShare, expPaid,
         refundApplied, creditOffsetApplied, date:s.date,
-        isCredit:delta<0,
-        netRefund
+        isCredit:delta<0, netRefund
       });
     }
   });
+
+  // Final carry = member's net position (negative=credit, positive=debt)
+  const sessionNetBal=carry;
 
   const projectRows = [];
   STATE.projects.forEach(p=>{
@@ -2446,8 +2484,8 @@ function renderChipinBody(s){
     let status;
     if(!myShare) status='noamt';
     else if(isExpensePayer) status='refund';
-    else if(remainingCredit>0.005) status='paid'; // credit fully covers this session
-    else if(bal<0.005&&(totalOwed>0||paid>0)) status='paid'; // bal≈0: paid off (handles float drift)
+    else if(rawOwed<=0.005) status='paid'; // carry-over credit covers this session (even if all leftover credit was offset away)
+    else if(bal<0.005&&(totalOwed>0||paid>0)) status='paid'; // bal≈0: paid off via cash (handles float drift)
     else if(paid>0) status='partial';
     else status='unpaid';
 
@@ -2460,7 +2498,7 @@ function renderChipinBody(s){
     const overpaymentAvail=Math.max(0,overpayment-overpaymentApplied);
     const hasOverpayment=overpayment>0.05;
 
-    return {aid,nm,m,paid,bal,status,perHead:myShare,carryover,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer,overpayment,overpaymentAvail,overpaymentApplied,hasOverpayment};
+    return {aid,nm,m,paid,bal,status,perHead:myShare,carryover,rawOwed,totalOwed,remainingCredit,expPaid,netRefund,effectiveRefund,isExpensePayer,overpayment,overpaymentAvail,overpaymentApplied,hasOverpayment};
   });
   // Compute normalOwed from ALL rows (before member filtering) — carry-over-adjusted
   // Credit-covered players (totalOwed=0) correctly contribute 0, fixing false "Remaining"
@@ -2539,8 +2577,9 @@ function renderChipinBody(s){
         ${normalRows.map(r=>{
           const carryDebt=Math.max(0,r.carryover);
           const carryCredit=Math.max(0,-r.carryover);
+          const creditCovered=r.rawOwed<=0.005; // carry covers full share (may have no remainingCredit if all offset)
           return `
-          <div class="chipin-row ${r.status}" style="${r.remainingCredit>0.005?'border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)':r.hasOverpayment&&r.overpaymentAvail>0.005?'border-color:rgba(0,212,255,0.3);background:rgba(0,212,255,0.04)':''}">
+          <div class="chipin-row ${r.status}" style="${(r.remainingCredit>0.005||creditCovered)?'border-color:rgba(0,232,153,0.3);background:rgba(0,232,153,0.04)':r.hasOverpayment&&r.overpaymentAvail>0.005?'border-color:rgba(0,212,255,0.3);background:rgba(0,212,255,0.04)':''}">
             <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
               <div class="m-avatar" style="width:28px;height:28px;font-size:10px;background:${avatarColor(r.nm)}22;color:${avatarColor(r.nm)}">${initials(r.nm)}</div>
               <div style="min-width:0">
@@ -2548,11 +2587,13 @@ function renderChipinBody(s){
                 <div style="font-size:10px;color:var(--text3)">
                   ${r.remainingCredit>0.005
                     ? `This session: <span style="color:var(--green)">Fully covered by credit</span> · <span style="color:var(--green);font-weight:600">Leftover credit: ${fmtMoney(r.remainingCredit)}</span>`
-                    : `Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}`
+                    : creditCovered
+                      ? `Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span> · Bal <span style="color:var(--green)">${fmtMoney(r.bal)}</span>`
+                      : `Paid ${fmtMoney(r.paid)} of ${fmtMoney(r.totalOwed)}`
                   }
-                  ${carryDebt>0.005?`<span style="color:var(--orange)"> (+${fmtMoney(carryDebt)} unpaid prev.)</span>`:''}
-                  ${carryCredit>0.005&&r.remainingCredit<=0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
-                  ${r.remainingCredit<=0.005?` · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>`:''}
+                  ${!creditCovered&&carryDebt>0.005?`<span style="color:var(--orange)"> (+${fmtMoney(carryDebt)} unpaid prev.)</span>`:''}
+                  ${!creditCovered&&carryCredit>0.005&&r.remainingCredit<=0.005?`<span style="color:var(--green)"> (−${fmtMoney(carryCredit)} credit from prev.)</span>`:''}
+                  ${!creditCovered&&r.remainingCredit<=0.005?` · Bal <span style="color:${r.bal>0?'var(--red)':'var(--green)'}">${fmtMoney(r.bal)}</span>`:''}
                 </div>
                 ${r.hasOverpayment?`<div style="font-size:10px;margin-top:3px">
                   <span style="color:var(--primary)">↑ Overpaid by ${fmtMoney(r.overpayment)}</span>
@@ -2569,7 +2610,7 @@ function renderChipinBody(s){
                   : r.status==='paid'?'<span class="badge badge-green">Paid</span>':r.status==='partial'?'<span class="badge badge-gold">Partial</span>':r.status==='unpaid'?'<span class="badge badge-red">Unpaid</span>':'<span class="badge badge-ghost">—</span>'
               }
               ${r.hasOverpayment&&r.overpaymentAvail>0.05?`<span class="badge badge-primary" style="font-size:9px">↩ ${fmtMoney(r.overpaymentAvail)}</span>`:''}
-              ${(canAdmin()||(isMember&&r.aid===myId))&&r.remainingCredit<=0.005?`
+              ${(canAdmin()||(isMember&&r.aid===myId))&&r.remainingCredit<=0.005&&!creditCovered?`
                 ${r.status!=='paid'?`<button class="btn btn-ghost btn-xs" onclick="openPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">Pay</button>`:''}
                 ${canAdmin()?`<button class="btn btn-ghost btn-xs" style="color:var(--gold);border-color:rgba(255,196,51,0.4)" title="Edit amount paid" onclick="openEditPayModal('${s.id}','${r.aid}','${esc(r.nm)}',${r.paid},${r.totalOwed})">✏️</button>`:''}
               `:''}
@@ -3503,9 +3544,11 @@ window.saveChipinPayment = async function(sid,mid){
     const s=STATE.sessions.find(x=>x.id===debt.sid);if(!s)continue;
     const payments=[...(s.payments||[])];
     const idx=payments.findIndex(p=>p.memberId===mid);
+    const existing=idx>=0?payments[idx]:{};
     const newPaid=debt.paid+apply;
     const newStatus=newPaid>=debt.owed-0.005?'paid':newPaid>0?'partial':'unpaid';
-    const entry={memberId:mid,amountPaid:newPaid,status:newStatus,note,updatedAt:new Date().toISOString()};
+    // Spread existing to preserve refundApplied, creditOffsetApplied, offsetSources
+    const entry={...existing,memberId:mid,amountPaid:newPaid,status:newStatus,note,updatedAt:new Date().toISOString()};
     if(idx>=0)payments[idx]=entry;else payments.push(entry);
     updates[debt.sid]=payments;
   }
@@ -3970,6 +4013,7 @@ function renderHistoryCard(s){
           if(perHead){
             if(isExpPayer) status='<span class="badge badge-primary">Paid Exp</span>';
             else if(balH<0.005&&(owed>0||paid>0)) status='<span class="badge badge-green">Paid</span>';
+            else if(balH<0.005&&owed<=0.005&&paid<=0.005) status='<span class="badge badge-green">Paid</span>'; // carry-credit covered
             else if(paid>0) status='<span class="badge badge-gold">Part</span>';
             else if(owed>0) status='<span class="badge badge-red">Unpaid</span>';
             else status='<span class="badge badge-ghost">—</span>';
