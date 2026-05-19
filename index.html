@@ -1105,7 +1105,7 @@ function gatherOutstanding(){
   STATE.projects.forEach(p=>{
     (p.members||[]).forEach(pm=>{
       const m=STATE.members.find(x=>x.id===pm.memberId);const nm=m?m.name:'?';
-      const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
+      const due=parseFloat(pm.amountDue!=null?pm.amountDue:(pm.fixedAmount!=null?pm.fixedAmount:p.fixedAmount))||0;
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       if(bal>0.005){
@@ -1260,7 +1260,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
   STATE.projects.forEach(p=>{
     const pm=(p.members||[]).find(x=>x.memberId===memberId);
     if(!pm) return;
-    const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
+    const due=parseFloat(pm.amountDue!=null?pm.amountDue:(pm.fixedAmount!=null?pm.fixedAmount:p.fixedAmount))||0;
     const paid=parseFloat(pm.amountPaid)||0;
     const bal=due-paid;
     if(bal>0.005) projectRows.push({name:esc(p.name||'Project'), due, paid, bal});
@@ -2691,7 +2691,7 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   STATE.projects.forEach(function(p){
     (p.members||[]).forEach(function(pm){
       if(pm.memberId===payerId) return; // skip payer's own project membership
-      const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
+      const due=parseFloat(pm.amountDue!=null?pm.amountDue:(pm.fixedAmount!=null?pm.fixedAmount:p.fixedAmount))||0;
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       if(bal>0.005){
@@ -3757,7 +3757,7 @@ window.showProjectDetail = function(pid){
     <div class="card-title">Members</div>
     ${members.map(pm=>{
       const m=STATE.members.find(x=>x.id===pm.memberId);const nm=m?m.name:'?';
-      const due=parseFloat(pm.fixedAmount||p.fixedAmount)||0;
+      const due=parseFloat(pm.amountDue!=null?pm.amountDue:(pm.fixedAmount!=null?pm.fixedAmount:p.fixedAmount))||0;
       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       const status=!due?'noamt':bal<0.005&&(due>0||paid>0)?'paid':paid>0?'partial':'unpaid';
