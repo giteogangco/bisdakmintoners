@@ -926,7 +926,7 @@ function renderDashboard(el){
   const lastSession = STATE.sessions[0];
   const outstanding = gatherOutstanding();
   const debtors = outstanding.filter(o=>o.netDebt>0.005);
-  const creditHolders = outstanding.filter(o=>o.netCredit>0.005);
+  const creditHolders = outstanding.filter(o=>o.netCredit>=0.05);
   const totalOutstanding = debtors.reduce((s,o)=>s+o.netDebt,0);
   const totalExcess = creditHolders.reduce((s,o)=>s+o.netCredit,0);
   // The difference (Credit - Outstanding) = total net cash overpaid by members.
