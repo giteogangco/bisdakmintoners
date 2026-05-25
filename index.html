@@ -2673,7 +2673,7 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       const sPay=(ss.payments||[]).find(function(p){return p.memberId===aid;});
       const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
       const sOwed=Math.max(0,sMyShare-sExpPaid);
-      const sBal=sOwed-sPaid;
+      const sOffsetPaid=(sPay&&sPay.offsetSources)?sPay.offsetSources.reduce(function(s,o){return s+(o.amount||0);},0):0;      const sBal=sOwed-sPaid-sOffsetPaid;
       if(sBal>0.005){
         const m=STATE.members.find(function(x){return x.id===aid;});
         if(!memberDebts[aid]) memberDebts[aid]={aid, nm:m?m.name:'?', totalBal:0, sessions:[]};
