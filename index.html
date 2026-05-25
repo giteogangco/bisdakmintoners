@@ -13,7 +13,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:wght@300;400;500;600;700&family=Barlow+Condensed:wght@400;600;700&display=swap" rel="stylesheet"/>
 <style>
 :root{
-  --bg:#060a0f;--bg2:#0b1018;--surface:#0f1520;--surface2:#141d2a;--surface3:#1a2535;
+  --bg:#060a0f;--bg2:#0b1018;--surface:#0f1520;--surface2:#141d2a;--surface3:#h1a2535;
   --border:#1e2d40;--border2:#253448;
   --primary:#00d4ff;--primary-dim:rgba(0,212,255,0.12);--primary-glow:rgba(0,212,255,0.25);
   --gold:#ffc433;--gold-dim:rgba(255,196,51,0.12);
@@ -1106,7 +1106,7 @@ function gatherOutstanding(){
     (p.members||[]).forEach(pm=>{
       const m=STATE.members.find(x=>x.id===pm.memberId);const nm=m?m.name:'?';
       const due=parseFloat(pm.amountDue!=null?pm.amountDue:(pm.fixedAmount!=null?pm.fixedAmount:p.fixedAmount))||0;
- totalOutstanding = debtors.reduce((s,o)=>s+Math.max(0,o.sessionBal-o.creditBal),0);     const paid=parseFloat(pm.amountPaid)||0;
+       const paid=parseFloat(pm.amountPaid)||0;
       const bal=due-paid;
       if(bal>0.005){
         if(!memberTotals[pm.memberId]) memberTotals[pm.memberId]={name:nm,sessionBal:0,projectBal:0,creditBal:0};
