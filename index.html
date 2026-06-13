@@ -2646,16 +2646,35 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
   // Group by member — show net balance across all sessions
   const memberDebts = {}; // memberId -> {nm, totalBal, sessions:[{sid,label,bal,paid,owed}]}
 
-  STATE.sessions.forEach(function(ss){
-    const sAtt=ss.attendees||[];
-    const sExp=ss.expenses||[];
-    if(!sAtt.length) return;
-    const sExpPayer={};
-    sExp.forEach(function(e){ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+  // Gather each member's offsettable session balances using the SAME rolling
+  // carry-over credit model as gatherOutstanding / showOutstandingBreakdown.
+  // A member's overpayment or expense refund in an earlier session carries
+  // forward as credit and covers later sessions, so sessions already settled by
+  // that credit must NOT appear here. (Previously each session was computed in
+  // isolation, which made already-paid/credit-covered sessions show up.)
+  const _sortedOffsetSessions=[...STATE.sessions].sort(function(a,b){return new Date(a.date)-new Date(b.date);});
 
-    sAtt.forEach(function(aid){
-      if(aid===payerId) return;
-      // Use includedPlayers-aware share (consistent with renderChipinBody)
+  STATE.members.forEach(function(m){
+    const aid=m.id;
+    if(aid===payerId) return; // payer can't offset against their own debt
+    let credit=0; // rolling credit available to this member (>=0)
+    const sessRows=[];
+
+    _sortedOffsetSessions.forEach(function(ss){
+      const sAtt=ss.attendees||[];
+      const sPay=(ss.payments||[]).find(function(p){return p.memberId===aid;});
+      const coa=sPay?parseFloat(sPay.creditOffsetApplied)||0:0; // credit this member spent elsewhere
+
+      if(!sAtt.includes(aid)){
+        // Non-attendee: only relevant if their credit was used to offset here
+        if(coa>0.005) credit=Math.max(0,credit-coa);
+        return;
+      }
+
+      const sExp=ss.expenses||[];
+      const sExpPayer={};
+      sExp.forEach(function(e){ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
+      const sExpPaid=sExpPayer[aid]||0;
       const sMyShare=(function(){
         if(!sExp.length) return parseFloat(ss.perHead)||0;
         const fs=sExp.reduce(function(sum,e){
@@ -2666,21 +2685,40 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
         },0);
         return fs>0?fs:(parseFloat(ss.perHead)||0);
       })();
-      if(!sMyShare) return;
-      const sExpPaid=sExpPayer[aid]||0;
-      const sNetRef=sExpPaid-sMyShare;
-      if(sNetRef>0) return; // also a net expense payer — skip
-      const sPay=(ss.payments||[]).find(function(p){return p.memberId===aid;});
-      const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
+      const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0; // already includes any offsets applied to this member
+      const refundApplied=sPay?parseFloat(sPay.refundApplied)||0:0;
       const sOwed=Math.max(0,sMyShare-sExpPaid);
-      const sOffsetPaid=(sPay&&sPay.offsetSources)?sPay.offsetSources.reduce(function(s,o){return s+(o.amount||0);},0):0;      const sBal=sOwed-sPaid-sOffsetPaid;
-      if(sBal>0.005){
-        const m=STATE.members.find(function(x){return x.id===aid;});
-        if(!memberDebts[aid]) memberDebts[aid]={aid, nm:m?m.name:'?', totalBal:0, sessions:[]};
-        memberDebts[aid].totalBal+=sBal;
-        memberDebts[aid].sessions.push({sid:ss.id, date:ss.date, label:fmtDate(ss.date)+(ss.venue?' · '+esc(ss.venue):''), bal:sBal, paid:sPaid, owed:sOwed});
+      const netRefund=sExpPaid-sMyShare;
+
+      if(netRefund>0){
+        // Net expense payer: gains credit equal to unrecovered refund
+        credit+=Math.max(0,netRefund-refundApplied);
+        if(coa>0.005) credit=Math.max(0,credit-coa);
+        return;
+      }
+
+      // Normal player: cash still owed after their own recorded payment
+      let remaining=sOwed-sPaid;
+      if(remaining<-0.005){
+        // Overpaid this session -> the surplus becomes carry-over credit
+        credit+=Math.max(0,(-remaining)-refundApplied);
+        remaining=0;
+      }
+      // Apply carried credit to whatever is still owed
+      if(remaining>0.005 && credit>0.005){
+        const use=Math.min(credit,remaining);
+        remaining-=use; credit-=use;
+      }
+      if(coa>0.005) credit=Math.max(0,credit-coa);
+
+      if(remaining>0.005){
+        sessRows.push({sid:ss.id, date:ss.date, label:fmtDate(ss.date)+(ss.venue?' · '+esc(ss.venue):''), bal:remaining, paid:sPaid, owed:sOwed});
       }
     });
+
+    if(sessRows.length){
+      memberDebts[aid]={aid, nm:m.name||'?', totalBal:sessRows.reduce(function(s,r){return s+r.bal;},0), sessions:sessRows};
+    }
   });
 
   const eligiblePlayers = Object.values(memberDebts).sort((a,b)=>b.totalBal-a.totalBal)
