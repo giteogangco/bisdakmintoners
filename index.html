@@ -747,6 +747,31 @@ function fmtMoney(n){ return 'AED '+(parseFloat(n)||0).toLocaleString('en-AE',{m
 function canAdmin(){ return ['superadmin','admin'].includes(STATE.role); }
 function uid(){ return 'm'+Date.now()+Math.floor(Math.random()*10000); }
 
+// ============ SHARE CALC (single source of truth) ============
+// Balances smaller than this (leftover fils from rounding/splits) count as settled
+const DUST = 0.10;
+// One player's share of an expense, rounded to 2 decimals (same rounding used for all past sessions)
+function splitShare(amount, incl, mid){
+  if(!incl.length||!incl.includes(mid)) return 0;
+  return Math.round(((parseFloat(amount)||0)/incl.length)*100)/100;
+}
+// A member's share of a session. Uses expenses when any have an amount; otherwise the manual per-head.
+function calcShare(expenses, att, mid, fallbackPerHead){
+  const priced=(expenses||[]).filter(e=>(parseFloat(e.amount)||0)>0);
+  if(!priced.length) return fallbackPerHead||0;
+  const cents=priced.reduce((sum,e)=>{
+    const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
+    return sum+Math.round(splitShare(e.amount,incl,mid)*100);
+  },0);
+  return cents/100;
+}
+// Average share per attendee (display / Chip-In base)
+function calcPerHead(expenses, att, fallbackPerHead){
+  if(!att.length) return 0;
+  const total=att.reduce((sum,aid)=>sum+calcShare(expenses,att,aid,fallbackPerHead),0);
+  return Math.round((total/att.length)*100)/100;
+}
+
 const EXP_CATS = { court:'🏟️ Court', shuttle:'🏸 Shuttle', food:'🍱 Food', equipment:'🎒 Equipment', other:'📦 Other' };
 const EXP_COLORS = { court:'var(--primary)', shuttle:'var(--gold)', food:'var(--green)', equipment:'var(--orange)', other:'var(--text2)' };
 
@@ -1022,16 +1047,7 @@ function gatherOutstanding(){
 
     att.forEach(aid=>{
       const carry=memberCarry[aid]||0; // rolling carry into this session
-      const myShare=(()=>{
-        if(!expenses.length) return parseFloat(s.perHead)||0;
-        const fs=expenses.reduce((sum,e)=>{
-          const amt=parseFloat(e.amount)||0; if(!amt) return sum;
-          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-          if(!incl.includes(aid)) return sum;
-          return sum+Math.round((amt/incl.length)*100)/100;
-        },0);
-        return fs>0?fs:(parseFloat(s.perHead)||0);
-      })();
+      const myShare=calcShare(expenses,att,aid,parseFloat(s.perHead)||0);
       if(!myShare&&!expPayerTotals[aid]){ return; }
 
       const pay=(s.payments||[]).find(p=>p.memberId===aid);
@@ -1122,7 +1138,7 @@ function gatherOutstanding(){
     const netDebt=Math.max(0,balance-creditBal);
     return {memberId:id,name:d.name,sessionBal:d.sessionBal,projectBal:d.projectBal,
       creditBal,balance,netCredit,netDebt};
-  }).filter(o=>o.netDebt>0.005||o.netCredit>0.005)
+  }).filter(o=>o.netDebt>=DUST||o.netCredit>=DUST)
     .sort((a,b)=>(b.netDebt+b.netCredit)-(a.netDebt+a.netCredit));
 }
 
@@ -1197,16 +1213,7 @@ window.showOutstandingBreakdown = function(memberId, memberName){
     const expPayerTotals={};
     expenses.forEach(e=>{ if(e.paidBy) expPayerTotals[e.paidBy]=(expPayerTotals[e.paidBy]||0)+(parseFloat(e.amount)||0); });
     const expPaid=expPayerTotals[memberId]||0;
-    const myShare=(()=>{
-      if(!expenses.length) return parseFloat(s.perHead)||0;
-      const fs=expenses.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0; if(!amt) return sum;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-        if(!incl.includes(memberId)) return sum;
-        return sum+Math.round((amt/incl.length)*100)/100;
-      },0);
-      return fs>0?fs:(parseFloat(s.perHead)||0);
-    })();
+    const myShare=calcShare(expenses,att,memberId,parseFloat(s.perHead)||0);
     const pay=(s.payments||[]).find(p=>p.memberId===memberId);
     const paid=pay?parseFloat(pay.amountPaid)||0:0;
     const refundApplied=pay?parseFloat(pay.refundApplied)||0:0;
@@ -1717,8 +1724,7 @@ window.saveLatePlayers = async function(){
   });
   // Recalculate perHead: if expenses exist, spread over new att count
   const expenses = s.expenses||[];
-  const expTotal = expenses.reduce(function(sum,e){return sum+(parseFloat(e.amount)||0);},0);
-  const perHead = att.length>0 && expTotal>0 ? Math.round((expTotal/att.length)*100)/100 : (parseFloat(s.perHead)||0);
+  const perHead = calcPerHead(expenses, att, parseFloat(s.perHead)||0);
   try{
     await updateDoc(doc(db,'sessions',sid),{attendees:att,queueOrder:queue,payments:existingPayments,perHead:perHead});
     closeModal('latePlayerModal');
@@ -1737,11 +1743,13 @@ window.generateMatchup = async function(sid){
   const numCourts = parseInt(s.numCourts)||1;
   if(activeMatches.length >= numCourts){ toast('All courts occupied','error'); return; }
 
-  const nextCourtNum = (activeMatches.map(m=>m.courtNum||1).sort().pop()||0)+1;
+  const nextCourtNum = freeCourtNum(activeMatches);
+  const onCourtIds = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
 
-  // If there are pre-scheduled matches, activate the next one
+  // If there are pre-scheduled matches, activate the first one whose players are all free
   if(scheduledMatches.length > 0){
-    const nextScheduled = scheduledMatches[0];
+    const nextScheduled = scheduledMatches.find(m=>!(m.team1||[]).concat(m.team2||[]).some(id=>onCourtIds.includes(id)));
+    if(!nextScheduled){ toast('Next scheduled players are still on court — wait for a match to finish','info'); return; }
     const updatedMatches = allMatches.map(m=>
       m.id===nextScheduled.id ? {...m, scheduled:false, courtNum:nextCourtNum, activatedAt:new Date().toISOString()} : m
     );
@@ -1753,7 +1761,6 @@ window.generateMatchup = async function(sid){
   }
 
   // No schedule — generate a fresh match on the fly
-  const onCourtIds = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
   const availableInQueue = (s.queueOrder||[]).filter(id=>!onCourtIds.includes(id));
   if(availableInQueue.length < 4){ toast('Need 4+ players in queue','error'); return; }
 
@@ -1764,10 +1771,10 @@ window.generateMatchup = async function(sid){
 
   let team1, team2, matchType;
   if(isAdvSlot){
-    const advPlayers = (s.attendees||[]).filter(id=>{const m=STATE.members.find(x=>x.id===id);return m?.skill==='Advanced';});
+    const advPlayers = pickAdvPlayers(s, onCourtIds);
     if(advPlayers.length>=4){
-      const shuffled=[...advPlayers].sort(()=>Math.random()-0.5);
-      team1=[shuffled[0],shuffled[1]];team2=[shuffled[2],shuffled[3]];
+      const res = buildBalancedTeams(advPlayers.slice(0,4), usedPairings);
+      team1=res.team1;team2=res.team2;
       matchType='advanced';
       toast('⚔️ Advanced Battle!','success');
     } else {
@@ -1809,9 +1816,9 @@ window.generateAllMatchups = async function(sid){
     const isAdvSlot = advInterval>0 && matchNum % advInterval === 0;
     let team1,team2,matchType;
     if(isAdvSlot){
-      const advPlayers=(s.attendees||[]).filter(id=>{const m=STATE.members.find(x=>x.id===id);return m?.skill==='Advanced';});
+      const advPlayers=pickAdvPlayers(s, (s.attendees||[]).filter(id=>!availableQueue.includes(id)));
       if(advPlayers.length>=4){
-        const sh=[...advPlayers].sort(()=>Math.random()-0.5);
+        const sh=advPlayers;
         team1=[sh[0],sh[1]];team2=[sh[2],sh[3]];matchType='advanced';
       } else {
         const res=buildBalancedTeams(availableQueue.slice(0,4),usedPairings);
@@ -1888,7 +1895,7 @@ window.generate10Matches = async function(sid){
     // Rotate queue: played 4 go to end
     const usedIds=[...team1,...team2];
     rotatingQueue = [...rotatingQueue.filter(id=>!usedIds.includes(id)), ...usedIds];
-    usedIds.forEach(a=>usedIds.forEach(b=>{ if(a!==b) usedPairings.add([a,b].sort().join('|')); }));
+    addPartnerPairs(usedPairings, {team1, team2});
 
     matchNum++;
     generated++;
@@ -1910,7 +1917,7 @@ window.openCustomMatchModal = function(sid){
   window._cmSessionId = sid;
   window._cmSelectedPlayers = [];
   const att = s.attendees||[];
-  const activeOnCourt = (s.matches||[]).filter(m=>!m.result).flatMap(m=>(m.team1||[]).concat(m.team2||[]));
+  const activeOnCourt = (s.matches||[]).filter(m=>!m.result && !m.scheduled).flatMap(m=>(m.team1||[]).concat(m.team2||[]));
 
   document.getElementById('cmPlayerChips').innerHTML = att.map(aid=>{
     const m=STATE.members.find(x=>x.id===aid);
@@ -1981,14 +1988,16 @@ window.saveCustomMatch = async function(){
   const team1 = sel.slice(0,2);
   const team2 = sel.slice(2,4);
   const matchType = document.getElementById('cmMatchType').value;
-  const activeMatches = (s.matches||[]).filter(m=>!m.result);
-  const completedMatches = (s.matches||[]).filter(m=>m.result);
+  const activeMatches = (s.matches||[]).filter(m=>!m.result && !m.scheduled);
   const numCourts = parseInt(s.numCourts)||1;
 
   if(activeMatches.length >= numCourts){ toast('All courts occupied','error'); return; }
+  const onCourt = activeMatches.flatMap(m=>(m.team1||[]).concat(m.team2||[]));
+  if(sel.some(id=>onCourt.includes(id))){ toast('A selected player is already on court','error'); return; }
 
-  const matchNum = completedMatches.length + activeMatches.length + 1;
-  const courtNum = (activeMatches.map(m=>m.courtNum||1).sort().pop()||0)+1;
+  // Number after every existing match (incl. scheduled) so numbers never clash
+  const matchNum = (s.matches||[]).reduce((mx,m)=>Math.max(mx,m.matchNum||0),0) + 1;
+  const courtNum = freeCourtNum(activeMatches);
 
   const matches = [...(s.matches||[]),{
     id:uid(), matchNum, matchType, courtNum,
@@ -2016,37 +2025,54 @@ window.clearSchedule = async function(sid){
   }catch(e){ toast(e.message,'error'); }
 };
 
+// Partner pairs only (teammates). Opponents are not counted, otherwise every split looks "used".
+function pairKey(a,b){ return [a,b].sort().join('|'); }
+function addPartnerPairs(set, match){
+  [match.team1||[],match.team2||[]].forEach(t=>{ if(t.length===2) set.add(pairKey(t[0],t[1])); });
+}
 function buildUsedPairings(matches){
   const set = new Set();
-  matches.filter(m=>m.result).forEach(m=>{
-    const pairs = [...(m.team1||[]),...(m.team2||[])];
-    for(let i=0;i<pairs.length;i++) for(let j=i+1;j<pairs.length;j++){
-      set.add([pairs[i],pairs[j]].sort().join('|'));
-    }
-  });
+  matches.filter(m=>m.result).forEach(m=>addPartnerPairs(set,m));
   return set;
 }
 
 function buildBalancedTeams(next4, usedPairings=new Set()){
-  const sorted = next4.map(id=>{
+  const sv = id=>{
     const m=STATE.members.find(x=>x.id===id);
-    const sv=m?.skill==='Advanced'?3:m?.skill==='Intermediate'?2:1;
-    return {id,sv};
-  }).sort((a,b)=>b[1]-a[1]);
+    return m?.skill==='Advanced'?3:m?.skill==='Intermediate'?2:1;
+  };
+  const sorted = [...next4].sort((a,b)=>sv(b)-sv(a));
 
-  // Try all possible balanced splits and prefer ones not seen before
+  // All 3 ways to split 4 players into 2 teams. Pick the smallest skill gap;
+  // among equally balanced splits, prefer partners who haven't teamed up yet.
   const combos = [
-    {t1:[sorted[0].id,sorted[3].id],t2:[sorted[1].id,sorted[2].id]},
-    {t1:[sorted[0].id,sorted[2].id],t2:[sorted[1].id,sorted[3].id]},
-    {t1:[sorted[0].id,sorted[1].id],t2:[sorted[2].id,sorted[3].id]},
-  ];
-  for(const c of combos){
-    const allPairs=[c.t1,c.t2].flatMap(team=>{
-      const [a,b]=team;return[[a,b].sort().join('|')];
-    });
-    if(allPairs.every(p=>!usedPairings.has(p))) return {team1:c.t1,team2:c.t2};
-  }
-  return {team1:combos[0].t1,team2:combos[0].t2}; // fallback
+    {t1:[sorted[0],sorted[3]],t2:[sorted[1],sorted[2]]},
+    {t1:[sorted[0],sorted[2]],t2:[sorted[1],sorted[3]]},
+    {t1:[sorted[0],sorted[1]],t2:[sorted[2],sorted[3]]},
+  ].map(c=>({
+    ...c,
+    gap: Math.abs(sv(c.t1[0])+sv(c.t1[1])-sv(c.t2[0])-sv(c.t2[1])),
+    repeats: [c.t1,c.t2].filter(t=>usedPairings.has(pairKey(t[0],t[1]))).length
+  }));
+  combos.sort((a,b)=>a.gap-b.gap||a.repeats-b.repeats);
+  return {team1:combos[0].t1,team2:combos[0].t2};
+}
+
+// Lowest court number not in use (keeps labels within 1..numCourts)
+function freeCourtNum(activeMatches){
+  const used=new Set(activeMatches.map(m=>m.courtNum));
+  let c=1; while(used.has(c)) c++;
+  return c;
+}
+
+// Pick 4 Advanced attendees who are free, shuffled
+function pickAdvPlayers(s, excludeIds){
+  const adv=(s.attendees||[]).filter(id=>{
+    if(excludeIds.includes(id)) return false;
+    const m=STATE.members.find(x=>x.id===id);return m?.skill==='Advanced';
+  });
+  for(let i=adv.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[adv[i],adv[j]]=[adv[j],adv[i]];}
+  return adv;
 }
 
 window.recordResult = async function(sid,matchId,result){
@@ -2300,18 +2326,7 @@ window.saveExpense = async function(){
 
   // Recalculate perHead: sum all expenses, divide by attendee count (consistent base for Chip-In)
   // Weighted average per-attendee share (respects includedPlayers per expense)
-  const perHead=(()=>{
-    if(!att.length) return 0;
-    const totalShares=att.reduce((sum,aid)=>{
-      const share=expenses.reduce((s,e)=>{
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-        if(!incl.includes(aid)) return s;
-        return s+Math.round((parseFloat(e.amount)||0)/incl.length*100)/100;
-      },0);
-      return sum+share;
-    },0);
-    return Math.round((totalShares/att.length)*100)/100;
-  })();
+  const perHead=calcPerHead(expenses,att,0);
 
   try{
     await updateDoc(doc(db,'sessions',sid),{expenses,perHead});
@@ -2327,9 +2342,8 @@ window.deleteExpense = async function(sid,eid){
   if(!confirm('Delete this expense?'))return;
   const s=STATE.sessions.find(x=>x.id===sid);if(!s)return;
   const expenses=(s.expenses||[]).filter(e=>e.id!==eid);
-  const total=expenses.reduce((sum,e)=>sum+(parseFloat(e.amount)||0),0);
   const att=s.attendees||[];
-  const perHead=att.length>0?Math.round((total/att.length)*100)/100:0;
+  const perHead=calcPerHead(expenses,att,0);
   try{
     await updateDoc(doc(db,'sessions',sid),{expenses,perHead});
     toast('Expense deleted','success');
@@ -2402,16 +2416,7 @@ function renderChipinBody(s){
       const pAtt=ps.attendees||[];if(!pAtt.includes(memberId))return;
       const pExp=ps.expenses||[];
       // ppShare: per-expense share for this member in the past session, fallback to stored perHead
-      const ppShare=(()=>{
-        if(!pExp.length) return parseFloat(ps.perHead)||0;
-        const fromExpenses=pExp.reduce((sum,e)=>{
-          const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:pAtt;
-          if(!incl.includes(memberId))return sum;
-          return sum+Math.round((amt/incl.length)*100)/100;
-        },0);
-        return fromExpenses>0?fromExpenses:(parseFloat(ps.perHead)||0);
-      })();
+      const ppShare=calcShare(pExp,pAtt,memberId,parseFloat(ps.perHead)||0);
       if(!ppShare)return;
 
       // How much did this member pay for expenses in this past session?
@@ -2467,16 +2472,7 @@ function renderChipinBody(s){
 
     // Net refund for THIS session = expenses paid out minus their own per-head share
     // myShare: sum of this player's share from each expense (respecting includedPlayers), fallback to stored perHead
-    const myShare=(()=>{
-      if(!expenses.length) return perHead;
-      const fromExpenses=expenses.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-        if(!incl.includes(aid))return sum;
-        return sum+Math.round((amt/incl.length)*100)/100;
-      },0);
-      return fromExpenses>0?fromExpenses:perHead;
-    })();
+    const myShare=calcShare(expenses,att,aid,perHead);
     const netRefund=expPaid-myShare; // positive = group owes them cash back
     const isExpensePayer=expPaid>0&&netRefund>0;
 
@@ -2499,7 +2495,7 @@ function renderChipinBody(s){
     if(!myShare) status='noamt';
     else if(isExpensePayer) status='refund';
     else if(rawOwed<=0.005) status='paid'; // carry-over credit covers this session (even if all leftover credit was offset away)
-    else if(bal<0.005&&(totalOwed>0||paid>0)) status='paid'; // bal≈0: paid off via cash (handles float drift)
+    else if(bal<DUST&&(totalOwed>0||paid>0)) status='paid'; // bal≈0: paid off via cash (ignores leftover fils)
     else if(paid>0) status='partial';
     else status='unpaid';
 
@@ -2675,16 +2671,7 @@ window.openRefundOffsetModal = function(sid, payerId, payerName, refundAmt){
       const sExpPayer={};
       sExp.forEach(function(e){ if(e.paidBy) sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0); });
       const sExpPaid=sExpPayer[aid]||0;
-      const sMyShare=(function(){
-        if(!sExp.length) return parseFloat(ss.perHead)||0;
-        const fs=sExp.reduce(function(sum,e){
-          const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-          const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:sAtt;
-          if(!incl.includes(aid))return sum;
-          return sum+Math.round((amt/incl.length)*100)/100;
-        },0);
-        return fs>0?fs:(parseFloat(ss.perHead)||0);
-      })();
+      const sMyShare=calcShare(sExp,sAtt,aid,parseFloat(ss.perHead)||0);
       const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0; // already includes any offsets applied to this member
       const refundApplied=sPay?parseFloat(sPay.refundApplied)||0:0;
       const sOwed=Math.max(0,sMyShare-sExpPaid);
@@ -3171,16 +3158,7 @@ window.autoSettleCarryOver = async function(sid, payerId, payerName, carryDebt){
     if(!pAtt.includes(payerId)) continue;
     const pExp=ps.expenses||[];
     // Use includedPlayers-aware share for consistency
-    const pMyShare=(()=>{
-      if(!pExp.length) return parseFloat(ps.perHead)||0;
-      const fs=pExp.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:pAtt;
-        if(!incl.includes(payerId))return sum;
-        return sum+Math.round((amt/incl.length)*100)/100;
-      },0);
-      return fs>0?fs:(parseFloat(ps.perHead)||0);
-    })();
+    const pMyShare=calcShare(pExp,pAtt,payerId,parseFloat(ps.perHead)||0);
     if(!pMyShare) continue;
 
     const pExpPayer={};
@@ -3240,81 +3218,46 @@ window.manualSetPerHead = async function(sid){
 
 // ---- helpers used by pay modal ----
 function _buildPayDebts(mid){
-  const allSessionDebts=[];
-  // Process oldest-first so carry-over credits flow forward correctly
-  const sortedSessions=[...STATE.sessions].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  // Total still owed comes from the same rolling carry-over the Home/Outstanding view uses,
+  // so the Pay screen and the dashboard always show the same number.
+  const ob=gatherOutstanding().find(o=>o.memberId===mid);
+  let remaining=ob?Math.round(ob.sessionBal*100)/100:0;
+  if(remaining<DUST) return [];
 
-  // Rolling credit carried forward from previous sessions (negative = credit, positive = debt)
-  let rollingCarry=0;
-
-  sortedSessions.forEach(s=>{
-    const sAtt=s.attendees||[];
+  // Spread that total over the sessions it came from. Each session only shows its OWN
+  // unpaid share (never earlier sessions' debt again). Credits are treated as having
+  // paid the oldest sessions first, so the newest unpaid sessions are listed.
+  const attended=[...STATE.sessions]
+    .filter(s=>(s.attendees||[]).includes(mid))
+    .sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const debts=[];
+  for(let i=attended.length-1;i>=0&&remaining>0.005;i--){
+    const s=attended[i];
     const sExp=s.expenses||[];
-
-    // Compute this member's share for this session
-    const sMyShare=(()=>{
-      if(!sExp.length)return parseFloat(s.perHead)||0;
-      const fs=sExp.reduce((sum,e)=>{
-        const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-        const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:sAtt;
-        if(!incl.includes(mid))return sum;
-        return sum+Math.round((amt/incl.length)*100)/100;
-      },0);
-      return fs>0?fs:(parseFloat(s.perHead)||0);
-    })();
-
-    if(!sAtt.includes(mid)){
-      // Not in this session — carry doesn't change
-      return;
+    const share=calcShare(sExp,s.attendees||[],mid,parseFloat(s.perHead)||0);
+    const expPaid=sExp.reduce((sum,e)=>sum+(e.paidBy===mid?(parseFloat(e.amount)||0):0),0);
+    const owed=Math.max(0,share-expPaid);
+    const pay=(s.payments||[]).find(p=>p.memberId===mid);
+    const paid=pay?parseFloat(pay.amountPaid)||0:0;
+    const own=Math.round(Math.max(0,owed-paid)*100)/100;
+    const bal=Math.min(own,remaining);
+    if(bal>0.005){
+      debts.unshift({sid:s.id,label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),owed,paid,bal});
+      remaining=Math.round((remaining-bal)*100)/100;
     }
-
-    const sExpPayer={};
-    sExp.forEach(e=>{if(e.paidBy)sExpPayer[e.paidBy]=(sExpPayer[e.paidBy]||0)+(parseFloat(e.amount)||0);});
-    const sExpPaid=sExpPayer[mid]||0;
-    const sPay=(s.payments||[]).find(p=>p.memberId===mid);
-    const sPaid=sPay?parseFloat(sPay.amountPaid)||0:0;
-    const sRefundApplied=sPay?parseFloat(sPay.refundApplied)||0:0;
-    const sCreditOffsetApplied=sPay?parseFloat(sPay.creditOffsetApplied)||0:0;
-
-    const netRefund=sExpPaid-sMyShare;
-
-    if(netRefund>0){
-      // Expense payer in this session — update rolling carry with their unrecovered refund
-      const unrecovered=Math.max(0,netRefund-sRefundApplied);
-      rollingCarry-=unrecovered; // credit (reduces future debts)
-      // Apply creditOffsetApplied unconditionally — reduces carry credit regardless of payer type
-      if(sCreditOffsetApplied>0.005) rollingCarry+=sCreditOffsetApplied;
-      return; // expense payers don't owe cash themselves
+  }
+  // Anything left (e.g. a credit that was offset elsewhere) is put on the latest session
+  if(remaining>0.005&&attended.length){
+    const last=attended[attended.length-1];
+    const ex=debts.find(d=>d.sid===last.id);
+    if(ex) ex.bal=Math.round((ex.bal+remaining)*100)/100;
+    else{
+      const pay=(last.payments||[]).find(p=>p.memberId===mid);
+      const paid=pay?parseFloat(pay.amountPaid)||0:0;
+      debts.push({sid:last.id,label:fmtDate(last.date)+(last.venue?' · '+esc(last.venue):''),owed:paid+remaining,paid,bal:remaining});
     }
-
-    // Normal player: rawOwed = share + carry (positive=debt, negative=credit from prev)
-    if(!sMyShare) return;
-    const sOwed=Math.max(0,sMyShare-sExpPaid);
-    const rawOwed=sOwed+rollingCarry; // rollingCarry negative = credit reduces this
-    const effectiveOwed=Math.max(0,rawOwed);
-
-    // Cash still needed = effectiveOwed - what they already paid
-    const sBal=effectiveOwed-sPaid;
-
-    if(sBal>0.005){
-      // Still has a real cash balance due
-      allSessionDebts.push({
-        sid:s.id,
-        label:fmtDate(s.date)+(s.venue?' · '+esc(s.venue):''),
-        owed:effectiveOwed,
-        paid:sPaid,
-        bal:sBal
-      });
-      // Update rolling carry: any unpaid balance carries forward as debt
-      const settledThisSession=Math.min(sPaid, effectiveOwed);
-      rollingCarry=rawOwed-settledThisSession; // remaining after payment
-    } else {
-      // Fully settled (by cash or credit) — update rolling carry
-      // Subtract any credit already offset to others via creditOffsetApplied
-      rollingCarry=rawOwed-sPaid+sCreditOffsetApplied; // reduce credit by what was already offset
-    }
-  });
-  return allSessionDebts;
+  }
+  return debts;
 }
 
 function _renderPayModalTotal(){
@@ -4048,16 +3991,7 @@ function renderHistoryCard(s){
           const paid=pay?parseFloat(pay.amountPaid)||0:0;
           const expPaid=expPayerTotals[m.id]||0;
           // Per-member share from expenses (respecting includedPlayers)
-          const myShare=perHead?(()=>{
-            if(!expenses.length)return perHead;
-            const fs=expenses.reduce((sum,e)=>{
-              const amt=parseFloat(e.amount)||0;if(!amt)return sum;
-              const incl=e.includedPlayers&&e.includedPlayers.length>0?e.includedPlayers:att;
-              if(!incl.includes(m.id))return sum;
-              return sum+Math.round((amt/incl.length)*100)/100;
-            },0);
-            return fs>0?fs:perHead;
-          })():0;
+          const myShare=perHead?calcShare(expenses,att,m.id,perHead):0;
           const isExpPayer=expPaid>0&&expPaid>myShare;
           const owed=isExpPayer?0:Math.max(0,myShare-expPaid);
           const balH=owed-paid;
